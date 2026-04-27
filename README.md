@@ -1,9 +1,9 @@
-# basal - an Icechunk native catalog
-
-*basal as in, the bottom layer of an icesheet, not the herb*
+# basal: an icechunk native catalog
 
 A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) with no external databases. 
 
+
+`*basal` as in, the bottom layer of an icesheet, not the herb.
 ** Warning, super experimental** may change at an time. 
 
 
@@ -27,7 +27,7 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/ ← Icechunk dataset 
 
 | Entry | Owner | Notes |
 |---|---|---|
-| `carbonplan-nohrsc-snowfall` | carbonplan | VirtualZarr |
+| `carbonplan-nohrsc-snowfall` | carbonplan | Virtual Zarr store |
 | `carbonplan-ocr-fire-risk` | carbonplan | |
 | `dwd-icon-eu` | dynamical.org | |
 | `ecmwf-aifs-single` | dynamical.org | |
@@ -491,7 +491,7 @@ sql(
 )
 # [('ecmwf-ifs-ens',), ('gefs-forecast-35d',), ('noaa-gefs-analysis',)]
 
-# arro3 Table (zero-copy from DuckDB, no pyarrow required)
+# arrow3 Table (zero-copy from DuckDB, no pyarrow required)
 tbl = sql_arrow(catalog, "SELECT * FROM entries")
 ```
 
