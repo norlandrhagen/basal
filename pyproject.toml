@@ -29,6 +29,7 @@ dev = [
     "prek>=0.1.0",
     "ruff>=0.4.0",
     "basal[search]",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.ruff]
