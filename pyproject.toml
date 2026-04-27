@@ -1,0 +1,40 @@
+[project]
+name = "basal"
+version = "0.0.1"
+description = "icechunk catalog"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "icechunk>=2.0.3",
+    "rich>=13.0.0",
+    "xarray>=2026.4.0",
+    "zarr>=3.1.6",
+]
+
+[project.optional-dependencies]
+search = ["fastembed>=0.2.0", "duckdb>=1.5.2", "arro3-core>=0.1.0"]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ipdb",
+    "h5netcdf",
+    "netcdf4",
+    "pooch",
+    "dask",
+    "prek>=0.1.0",
+    "ruff>=0.4.0",
+    "basal[search]",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F (Defaults), B (Bugbear), I (Isort), UP (Upgrade)
+select = ["E", "F", "B", "I", "UP"]
+ignore = ["E501"]

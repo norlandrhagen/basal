@@ -1,0 +1,33 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Lint
+        run: uv run prek run --all-files
+      - name: Build Check
+        run: uv build
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Testing across the modern spectrum
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Run Tests
+        # -n 2 enables xarray/icechunk tests to run in parallel 
+        # on the GHA dual-core runners.
+        run: uv run pytest -n 2
