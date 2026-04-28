@@ -138,7 +138,7 @@ def test_search_sql(catalog, fake_store):
     catalog.register(
         "wind", storage=fake_store, location="s3://bucket/wind/", owner="carbonplan"
     )
-    results = catalog.search(
+    results = catalog.sql(
         "SELECT name FROM entries WHERE metadata->>'owner' = 'carbonplan' ORDER BY name"
     )
     assert {r[0] for r in results} == {"sst", "wind"}
@@ -148,7 +148,7 @@ def test_search_no_results(catalog, fake_store):
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
-    results = catalog.search(
+    results = catalog.sql(
         "SELECT name FROM entries WHERE metadata->>'owner' = 'nobody'"
     )
     assert results == []

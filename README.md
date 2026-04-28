@@ -351,7 +351,7 @@ info = entry.inspect()
 Catalog operations log, newest first:
 
 ```python
-# All ops across all entries
+# Most recent 10 ops across all entries (default)
 catalog.history()
 # [{'event': 'registered', 'name': 'noaa-gfs-analysis',  'timestamp': datetime(...), 'snapshot_id': '...'},
 #  {'event': 'registered', 'name': 'noaa-gfs-forecast',  'timestamp': datetime(...), 'snapshot_id': '...'},
@@ -360,8 +360,8 @@ catalog.history()
 # Filter to one entry
 catalog.history(name="noaa-gfs-analysis")
 
-# Limit results
-catalog.history(limit=20)
+# More results
+catalog.history(limit=50)
 ```
 
 Events: `registered`, `updated`, `deregistered`. `snapshot_id` is present on `registered`/`updated` events — use it to pin `entry.to_xarray(snapshot_id=...)` to that exact metadata state.
@@ -466,7 +466,7 @@ catalog.facets()
 from basal.search import sql, sql_df, sql_arrow
 
 # Via catalog directly
-catalog.search("SELECT name FROM entries WHERE metadata->>'owner' = 'dynamical.org'")
+catalog.sql("SELECT name FROM entries WHERE metadata->>'owner' = 'dynamical.org'")
 # [('dwd-icon-eu',), ('ecmwf-aifs-single',), ('ecmwf-ifs-ens',), ...]
 
 # Or use the standalone functions for more return-type control:
@@ -503,18 +503,17 @@ Use `metadata->>'field'` for scalar extraction, `CAST(metadata->'field' AS VARCH
 
 #### Similarity search
 
-When you know what you're looking for but can't express it as a structured query, similarity search lets you describe it in plain text — or use a dataset you already know as the starting point.
+When you know what you're looking for but can't express it as a structured query, use `catalog.search()` to find entries by plain-text description — or use a dataset you already know as the starting point.
 
 ```python
-from basal.search import similar
-
 # Default: fastembed TextEmbedding runs locally, no API key
-results = similar(catalog, "high resolution precipitation radar CONUS", top_k=3)
+results = catalog.search("high resolution precipitation radar CONUS", top_k=3)
 # [(Entry(name='noaa-mrms-hourly', ...),   0.77),
 #  (Entry(name='noaa-hrrr-analysis', ...), 0.73),
 #  (Entry(name='noaa-hrrr-forecast', ...), 0.70)]
 
-# Or pass any embed_fn: list[str] -> list[list[float]]
+# Or use the standalone function with a custom embed_fn: list[str] -> list[list[float]]
+from basal.search import similar
 from fastembed import TextEmbedding
 model = TextEmbedding("BAAI/bge-small-en-v1.5")
 results = similar(
@@ -523,14 +522,11 @@ results = similar(
     embed_fn=lambda texts: list(model.embed(texts)),
     top_k=3,
 )
-
-# Shortcut via catalog
-results = catalog.search_similar("ocean reanalysis", top_k=3)
 ```
 
 `similar()` uses DuckDB `array_cosine_similarity` — no external vector DB. All metadata fields (including arbitrary kwargs) are automatically included in the embedding text.
 
-If you already know a useful dataset, find what else in the catalog resembles it — same variables, similar domain, related coverage:
+Find what else in the catalog resembles a known entry — same variables, similar domain, related coverage:
 
 ```python
 # Via catalog
@@ -552,6 +548,80 @@ for neighbor, score in entry.similar(catalog, n=3):
 ```
 
 
+### Catalog summary
+
+`catalog.summary()` shows field coverage across all entries and flags missing recommended fields:
+
+```python
+catalog.summary()
+# ┌──────────────────┬──────────┬──────────────────────┬─────────────┐
+# │ field            │ coverage │ bar                  │ recommended │
+# ├──────────────────┼──────────┼──────────────────────┼─────────────┤
+# │ title            │    14/14 │ ████████████████████ │      ✓      │
+# │ owner            │    14/14 │ ████████████████████ │      ✓      │
+# │ bbox             │    10/14 │ ██████████████░░░░░░ │      ✓      │
+# │ start_datetime   │     9/14 │ ████████████░░░░░░░░ │      ✓      │
+# │ license          │    13/14 │ ██████████████████░░ │      ✓      │
+# │ tags             │     8/14 │ ███████████░░░░░░░░░ │      ✓      │
+# │ ...              │          │                      │             │
+# └──────────────────┴──────────┴──────────────────────┴─────────────┘
+#
+# Recommended fields with incomplete coverage: bbox, start_datetime, tags
+# See STAC spec: https://github.com/radiantearth/stac-spec/...
+```
+
+### Extending time coverage
+
+For operational datasets that append data in time (NWP, reanalyses), `extend()` is cheaper than `update_from_store()` — it reads only the time coordinate, skips bbox and CF attr re-inspection:
+
+```python
+diff = catalog.extend("noaa-hrrr-forecast")
+# {'dataset_snapshot_id': ('abc123', 'xyz789'), 'end_datetime': ('2026-04-01T00:00:00Z', '2026-04-28T00:00:00Z')}
+
+# The catalog history entry reads:
+# "extend noaa-hrrr-forecast: 2026-04-01T00:00:00Z -> 2026-04-28T00:00:00Z"
+```
+
+Returns a dict of `{field: (old_value, new_value)}` for everything that changed — useful for logging or alerting.
+
+### STAC export
+
+Export the catalog as a [STAC Collection](https://github.com/radiantearth/stac-spec/blob/master/collection-spec/collection-spec.md) with Items. Only entries with `bbox` are exported as valid STAC Items — others are skipped with a warning.
+
+`geometry` (GeoJSON Polygon) is auto-derived from `bbox` at registration time, so no extra step needed:
+
+```python
+stac = catalog.to_stac(collection_id="my-catalog")
+stac["collection"]  # STAC Collection dict
+stac["items"]       # list of STAC Item dicts
+
+# Write to disk
+import json
+with open("catalog.json", "w") as f:
+    json.dump(stac, f, indent=2)
+```
+
+To register with spatial metadata explicitly:
+
+```python
+catalog.register(
+    "my-dataset",
+    storage=storage,
+    bbox=[-180.0, -90.0, 180.0, 90.0],   # geometry auto-derived from bbox
+    start_datetime="2015-01-01",
+    end_datetime=None,                     # ongoing
+)
+```
+
+To add spatial metadata to an existing entry:
+
+```python
+catalog.update("my-dataset", bbox=[-10.0, 30.0, 40.0, 70.0])
+# geometry is auto-derived and stored alongside bbox
+```
+
+
+
 ## Metadata schema
 
 Two fields are required:
@@ -566,6 +636,25 @@ Two fields are required:
 `name` is a positional argument to `register()`. `owner` is strongly recommended but optional. Both `location` and `format` are always present — `location` is auto-derived from the `storage` object, and `format` defaults to `"icechunk"`.
 
 Everything else is optional and unconstrained — pass any additional kwargs to `register()`. The protocol doesn't own your schema; domain-specific fields live in the free-form blob. See [Register and deregister](#register-and-deregister) for a full example.
+
+### Recommended fields
+
+These fields are optional but recommended for interoperability with STAC tooling and catalog discoverability. All map directly to [STAC Item spec](https://github.com/radiantearth/stac-spec/blob/master/item-spec/item-spec.md) fields:
+
+| Field | Description | STAC equivalent |
+|---|---|---|
+| `title` | Human-readable dataset name | `properties.title` |
+| `owner` | Producing organization or person | `properties.providers[].name` |
+| `bbox` | `[west, south, east, north]` WGS84 | `bbox` |
+| `start_datetime` | Coverage start, ISO 8601 | `properties.start_datetime` |
+| `end_datetime` | Coverage end, ISO 8601; omit if ongoing | `properties.end_datetime` |
+| `license` | SPDX identifier e.g. `CC-BY-4.0` | `properties.license` |
+| `tags` | List of keyword strings | `properties.keywords` |
+| `doi` | Dataset DOI | `sci:doi` ([scientific extension](https://github.com/stac-extensions/scientific)) |
+
+`geometry` (GeoJSON Polygon) is **auto-derived** from `bbox` — no need to set it manually.
+
+Use `catalog.summary()` to see which recommended fields are missing across your catalog.
 
 ## Design principles
 

@@ -275,6 +275,71 @@ class IcechunkCatalog:
         )
         self.update(name, **{**derived, **fields})
 
+    def extend(
+        self,
+        name: str,
+        branch: str = "main",
+        storage: icechunk.Storage | None = None,
+        config: icechunk.RepositoryConfig | None = None,
+    ) -> dict:
+        """Update end_datetime and dataset_snapshot_id from the latest time coordinate.
+
+        Cheaper than update_from_store — reads only the time coordinate array,
+        skips bbox and CF attr re-inspection. Intended for operational datasets
+        that append data in time (NWP forecasts, reanalyses, etc.).
+
+        Returns a dict with the old and new values that changed:
+        {"dataset_snapshot_id": ("old", "new"), "end_datetime": ("old", "new")}
+        """
+        import xarray as xr
+
+        from .inspect import _TIME_NAMES, _find_coord, _np_dt_to_iso
+
+        entry = self.get(name)
+        resolved = entry._resolve_storage(storage)
+        resolved_config = entry._resolve_repo_config(config)
+
+        kwargs: dict = {}
+        if resolved_config is not None:
+            kwargs["config"] = resolved_config
+        repo = icechunk.Repository.open(resolved, **kwargs)
+        new_snapshot_id = repo.lookup_branch(branch)
+        session = repo.readonly_session(branch=branch)
+        ds = xr.open_zarr(session.store, consolidated=False)
+
+        time_da = _find_coord(ds, "time", _TIME_NAMES)
+        new_end: str | None = None
+        if time_da is not None and time_da.size > 0:
+            new_end = _np_dt_to_iso(time_da.values.max())
+
+        old_snapshot_id = entry.metadata.get("dataset_snapshot_id")
+        old_end = entry.metadata.get("end_datetime")
+
+        updates: dict = {"dataset_snapshot_id": new_snapshot_id}
+        if new_end is not None:
+            updates["end_datetime"] = new_end
+
+        merged = {**entry.metadata, **updates}
+        from .schema import validate
+
+        validate(merged)
+
+        old_end_str = old_end or "?"
+        new_end_str = new_end or "unchanged"
+        session_w = self._repo.writable_session(name)
+        session_w.commit(
+            f"extend {name}: {old_end_str} -> {new_end_str}",
+            metadata={**merged, EVENT_KEY: "updated"},
+            allow_empty=True,
+        )
+
+        diff: dict = {}
+        if old_snapshot_id != new_snapshot_id:
+            diff["dataset_snapshot_id"] = (old_snapshot_id, new_snapshot_id)
+        if old_end != new_end and new_end is not None:
+            diff["end_datetime"] = (old_end, new_end)
+        return diff
+
     def deregister(self, name: str) -> None:
         self._repo.delete_branch(name)
 
@@ -313,17 +378,31 @@ class IcechunkCatalog:
             )
         return entries
 
-    def history(self, name: str | None = None, limit: int = 100) -> list[dict]:
+    def history(self, name: str | None = None, limit: int = 10) -> list[dict]:
         """Return catalog operation history, newest first. See ``history.collect_history``."""
         return collect_history(self._repo, name=name, limit=limit)
 
     # --- search ---
 
-    def search(self, query: str) -> list[tuple]:
-        """Run DuckDB SQL over entries(name, snapshot_id, metadata JSON)."""
+    def sql(self, query: str) -> list[tuple]:
+        """Run DuckDB SQL over entries(name VARCHAR, snapshot_id VARCHAR, metadata JSON)."""
         from .search import sql
 
         return sql(self, query)
+
+    def search(
+        self,
+        query: str,
+        embed_fn=None,
+        top_k: int = 5,
+    ) -> list[tuple]:
+        """Find entries most similar to a free-text query using vector cosine similarity.
+
+        Shorthand for similar(catalog, query). Requires basal[search].
+        """
+        from .search import similar
+
+        return similar(self, query, embed_fn=embed_fn, top_k=top_k)
 
     def similar_to(
         self,
@@ -525,7 +604,180 @@ class IcechunkCatalog:
                 stacklevel=2,
             )
 
+    # --- export ---
+
+    def to_stac(self, collection_id: str = "basal-catalog") -> dict:
+        """Export catalog as a STAC Collection with Items.
+
+        Only entries with bbox are exported as valid STAC Items — entries
+        missing bbox are skipped with a warning. geometry is auto-derived
+        from bbox (set automatically by register/update when bbox is present).
+
+        Returns a dict with:
+          - "collection": STAC Collection object
+          - "items": list of STAC Item dicts
+
+        Full STAC spec: https://github.com/radiantearth/stac-spec/
+        """
+        items = []
+        skipped = []
+
+        for entry in self.list():
+            bbox = entry.metadata.get("bbox")
+            if bbox is None:
+                skipped.append(entry.name)
+                continue
+
+            geometry = entry.metadata.get("geometry")
+            if geometry is None:
+                from .schema import _bbox_to_geometry
+
+                geometry = _bbox_to_geometry(bbox)
+
+            start_dt = entry.metadata.get("start_datetime")
+            end_dt = entry.metadata.get("end_datetime")
+            # STAC: datetime must be set; use null + start/end when range given
+            if start_dt and end_dt:
+                stac_datetime = None
+            elif start_dt:
+                stac_datetime = start_dt
+            else:
+                stac_datetime = None
+
+            properties: dict = {"datetime": stac_datetime}
+            if start_dt:
+                properties["start_datetime"] = start_dt
+            if end_dt:
+                properties["end_datetime"] = end_dt
+            for field in ("title", "license"):
+                if field in entry.metadata:
+                    properties[field] = entry.metadata[field]
+            if "tags" in entry.metadata:
+                properties["keywords"] = entry.metadata["tags"]
+            if "owner" in entry.metadata:
+                properties["providers"] = [{"name": entry.owner, "roles": ["producer"]}]
+            if "doi" in entry.metadata:
+                properties["sci:doi"] = entry.metadata["doi"]
+
+            links = []
+            if "doi" in entry.metadata:
+                links.append(
+                    {
+                        "rel": "cite-as",
+                        "href": f"https://doi.org/{entry.metadata['doi']}",
+                    }
+                )
+
+            item = {
+                "type": "Feature",
+                "stac_version": "1.0.0",
+                "id": entry.name,
+                "geometry": geometry,
+                "bbox": list(bbox),
+                "properties": properties,
+                "links": links,
+                "assets": {
+                    "data": {
+                        "href": entry.location,
+                        "type": "application/vnd+zarr",
+                        "roles": ["data"],
+                        "title": entry.metadata.get("title", entry.name),
+                    }
+                },
+            }
+            items.append(item)
+
+        if skipped:
+            warnings.warn(
+                f"{len(skipped)} entr{'y' if len(skipped) == 1 else 'ies'} "
+                f"skipped — no bbox (required for STAC): {skipped}. "
+                "Add with: catalog.update(name, bbox=[west, south, east, north])",
+                stacklevel=2,
+            )
+
+        # Compute collection-level bbox as union of all item bboxes
+        if items:
+            all_bboxes = [i["bbox"] for i in items]
+            union_bbox = [
+                min(b[0] for b in all_bboxes),
+                min(b[1] for b in all_bboxes),
+                max(b[2] for b in all_bboxes),
+                max(b[3] for b in all_bboxes),
+            ]
+        else:
+            union_bbox = [-180.0, -90.0, 180.0, 90.0]
+
+        collection = {
+            "type": "Collection",
+            "id": collection_id,
+            "stac_version": "1.0.0",
+            "description": "Icechunk dataset catalog exported from basal",
+            "links": [],
+            "extent": {
+                "spatial": {"bbox": [union_bbox]},
+                "temporal": {"interval": [[None, None]]},
+            },
+            "license": "various",
+        }
+
+        return {"collection": collection, "items": items}
+
     # --- pretty printing ---
+
+    def summary(self) -> None:
+        """Print field coverage across all entries, flagging missing recommended fields."""
+        from rich.console import Console
+        from rich.table import Table
+
+        from .schema import RECOMMENDED_FIELDS
+
+        entries = self.list()
+        n = len(entries)
+        if not n:
+            Console().print("[dim]Empty catalog[/dim]")
+            return
+
+        all_fields: set[str] = set()
+        for e in entries:
+            all_fields.update(e.metadata.keys())
+
+        # recommended first, then remaining sorted
+        ordered = list(RECOMMENDED_FIELDS) + sorted(
+            f for f in all_fields if f not in RECOMMENDED_FIELDS
+        )
+
+        table = Table(title=f"IcechunkCatalog summary ({n} entries)", show_header=True)
+        table.add_column("field", style="bold")
+        table.add_column("coverage", justify="right")
+        table.add_column("bar")
+        table.add_column("recommended", justify="center")
+
+        bar_width = 20
+        for field in ordered:
+            if field not in all_fields:
+                count = 0
+            else:
+                count = sum(1 for e in entries if field in e.metadata)
+            frac = count / n
+            filled = int(frac * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            coverage = f"{count}/{n}"
+            is_rec = "✓" if field in RECOMMENDED_FIELDS else ""
+            color = "green" if frac == 1.0 else ("yellow" if frac > 0 else "red")
+            table.add_row(field, coverage, f"[{color}]{bar}[/{color}]", is_rec)
+
+        Console().print(table)
+
+        missing_rec = [
+            f for f in RECOMMENDED_FIELDS if not all(f in e.metadata for e in entries)
+        ]
+        if missing_rec:
+            Console().print(
+                f"\n[yellow]Recommended fields with incomplete coverage:[/yellow] "
+                f"{', '.join(missing_rec)}\n"
+                f"[dim]See STAC spec: https://github.com/radiantearth/stac-spec/"
+                f"blob/master/item-spec/item-spec.md[/dim]"
+            )
 
     def describe(self, name: str) -> None:
         """Print a rich-formatted description of a catalog entry."""
