@@ -30,9 +30,9 @@ def _dynamical(bucket: str, prefix: str) -> icechunk.Storage:
 
 
 def _icechunk_public(prefix: str) -> icechunk.Storage:
-    """icechunk-public-data bucket: us-east-1, anonymous S3."""
+    """icechunk-public-data bucket: us-west-2, anonymous S3."""
     return icechunk.s3_storage(
-        bucket="icechunk-public-data", prefix=prefix, region="us-east-1", anonymous=True
+        bucket="icechunk-public-data", prefix=prefix, region="us-west-2", anonymous=True
     )
 
 

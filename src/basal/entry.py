@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import icechunk
 
-from .storage import default_virtual_chunk_credentials
+from .storage import _repo_config_from_virtual_chunks, default_virtual_chunk_credentials
 
 if TYPE_CHECKING:
     from .catalog import IcechunkCatalog
@@ -59,23 +59,16 @@ class Entry:
     def _resolve_repo_config(
         self, config: icechunk.RepositoryConfig | None = None
     ) -> icechunk.RepositoryConfig | None:
-        """Return config, building from virtual_chunk_containers_config if needed.
-
-        Falls back to inferred config when only url prefixes are recorded (e.g.
-        entries registered before auto-build was added): uses region from
-        storage_config and anonymous=True.
-        """
+        """Return config, reconstructing from stored metadata if not provided."""
         if config is not None:
             return config
         vcc = self.metadata.get("virtual_chunk_containers_config")
         if vcc:
-            from .storage import repo_config_from_virtual_chunks
-
-            return repo_config_from_virtual_chunks(vcc)
+            return _repo_config_from_virtual_chunks(vcc)
+        # Fallback for entries registered without config= (prefixes only stored).
+        # Infers region from storage_config and assumes anonymous=True.
         prefixes = self.metadata.get("virtual_chunk_containers", [])
         if prefixes:
-            from .storage import repo_config_from_virtual_chunks
-
             sc = self.metadata.get("storage_config") or {}
             containers = [
                 {
@@ -85,7 +78,7 @@ class Entry:
                 }
                 for p in prefixes
             ]
-            return repo_config_from_virtual_chunks(containers)
+            return _repo_config_from_virtual_chunks(containers)
         return None
 
     def _resolve_virtual_chunk_credentials(

@@ -205,16 +205,14 @@ at registration time). Explicit kwargs are proritized higher than anything deriv
 ### Virtual datasets (VirtualiZarr)
 
 Icechunk stores created with [VirtualiZarr](https://virtualizarr.readthedocs.io) reference external
-chunks in object storage rather than storing data directly. basal handles these with a bit of minimal extra
-configuration.
+chunks in rather than storing the data directly.
 
-**Registration** — pass `config` with a `VirtualChunkContainer` so basal can open the repo and
-detect virtual chunk containers. `virtual_chunk_containers_config` is then auto-built (region
-inferred from auto-derived `storage_config`, anonymous read assumed):
+**Registration** — build an `icechunk.RepositoryConfig` with your virtual chunk containers and pass
+it as `config=`. basal serializes the container settings so `to_xarray()` can reconstruct config
+and credentials automatically at read time:
 
 ```python
 import icechunk
-from basal.storage import repo_config_from_virtual_chunks
 
 dataset_storage = icechunk.s3_storage(
     bucket="carbonplan-share",
@@ -223,31 +221,34 @@ dataset_storage = icechunk.s3_storage(
     from_env=True,
 )
 
-# RepositoryConfig needed at registration so basal can open the repo and detect VC containers
-repo_config = repo_config_from_virtual_chunks(
-    [{"url_prefix": "s3://carbonplan-share/", "region": "us-west-2", "anonymous": True}]
+repo_config = icechunk.RepositoryConfig.default()
+repo_config.set_virtual_chunk_container(
+    icechunk.VirtualChunkContainer(
+        "s3://carbonplan-share/",
+        store=icechunk.ObjectStoreConfig.S3(
+            icechunk.S3Options(region="us-west-2", anonymous=True)
+        ),
+    )
 )
 
 catalog.register(
     "my-virtual-zarr-datacube",
     storage=dataset_storage,
     config=repo_config,
-    # virtual_chunk_containers_config auto-built from detected prefixes + storage region. May be fragile?
     owner="carbonplan",
     title="virtual zarr store of... ",
 )
 ```
 
-**Reading** — `entry.to_xarray()` can work with no extra arguments. Virtual chunk container config
-and anonymous credentials are reconstructed automatically from stored metadata:
+**Reading** — `entry.to_xarray()` works with no extra arguments. Container config and anonymous
+credentials are reconstructed automatically from stored metadata:
 
 ```python
 entry = catalog.get("my-virtual-dataset")
 ds = entry.to_xarray()
 ```
 
-Pass `authorize_virtual_chunk_access` explicitly when chunks require non-anonymous credentials
-(e.g. credentialed S3 access):
+Pass `authorize_virtual_chunk_access` explicitly when chunks require non-anonymous credentials:
 
 ```python
 import icechunk
@@ -258,9 +259,8 @@ credentials = icechunk.containers_credentials(
 ds = entry.to_xarray(authorize_virtual_chunk_access=credentials)
 ```
 
-> **Detection note:** Icechunk does not persist `RepositoryConfig` inside the store. Virtual chunk
-> containers are only detected at registration time if `config=` is passed with the containers
-> configured. Without it, `virtual_chunk_containers_config` is not stored and callers must pass
+> **Note:** Icechunk does not persist `RepositoryConfig` inside the store. Virtual chunk containers
+> are only detected at registration time if `config=` is passed. Without it, callers must pass
 > `config=` and `authorize_virtual_chunk_access=` explicitly at read time.
 
 ### Update metadata

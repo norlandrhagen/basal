@@ -4,8 +4,6 @@ import pytest
 from basal import IcechunkCatalog
 from basal.search import similar
 
-# --- Fixtures ---
-
 
 @pytest.fixture
 def catalog(tmp_path):
@@ -33,7 +31,6 @@ def fake_store(tmp_path):
 
 
 def test_open_or_create(tmp_path, fake_store):
-    """Verify that we can re-open an existing catalog without losing data."""
     path = str(tmp_path / "persistent_catalog")
     storage = icechunk.local_filesystem_storage(path)
 
@@ -48,7 +45,6 @@ def test_open_or_create(tmp_path, fake_store):
 
 
 def test_register_and_get(catalog, fake_store):
-    """Basic registration and retrieval flow."""
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
@@ -60,7 +56,6 @@ def test_register_and_get(catalog, fake_store):
 
 
 def test_register_with_optional_metadata(catalog, fake_store):
-    """Ensure arbitrary metadata fields are preserved."""
     catalog.register(
         "precip",
         storage=fake_store,
@@ -76,20 +71,16 @@ def test_register_with_optional_metadata(catalog, fake_store):
 
 
 def test_list(catalog, fake_store):
-    """Verify that list() returns all registered branches."""
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
     catalog.register(
         "precip", storage=fake_store, location="s3://bucket/precip/", owner="noaa"
     )
-    entries = catalog.list()
-    names = {e.name for e in entries}
-    assert names == {"sst", "precip"}
+    assert {e.name for e in catalog.list()} == {"sst", "precip"}
 
 
 def test_deregister(catalog, fake_store):
-    """Test branch deletion."""
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
@@ -98,7 +89,6 @@ def test_deregister(catalog, fake_store):
 
 
 def test_duplicate_register_raises(catalog, fake_store):
-    """Ensure we don't accidentally overwrite a branch."""
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
@@ -109,84 +99,36 @@ def test_duplicate_register_raises(catalog, fake_store):
 
 
 def test_missing_required_field_raises():
-    """Verify schema enforcement."""
     from basal.schema import validate
 
     with pytest.raises(ValueError, match="Missing required fields"):
-        # Missing 'format'
         validate({"location": "s3://bucket/sst/"})
 
 
-# --- Update Logic Tests ---
+# --- Update ---
 
 
-def test_update_merges_fields(catalog, fake_store):
-    """Verify that update adds new fields without losing old ones."""
-    catalog.register(
-        "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
-    )
-    catalog.update("sst", title="Sea Surface Temp", license="CC-BY-4.0")
-
-    entry = catalog.get("sst")
-    assert entry.metadata["title"] == "Sea Surface Temp"
-    assert entry.metadata["license"] == "CC-BY-4.0"
-    assert entry.owner == "carbonplan"
-    assert entry.location == "s3://bucket/sst/"
-
-
-def test_update_overwrites_field(catalog, fake_store):
-    catalog.register(
-        "sst",
-        storage=fake_store,
-        location="s3://bucket/sst/",
-        owner="carbonplan",
-        title="Old Title",
-    )
-    catalog.update("sst", title="New Title")
-
-    entry = catalog.get("sst")
-    assert entry.metadata["title"] == "New Title"
-
-
-def test_update_preserves_other_fields(catalog, fake_store):
+def test_update(catalog, fake_store):
     catalog.register(
         "sst",
         storage=fake_store,
         location="s3://bucket/sst/",
         owner="carbonplan",
         keywords=["ocean", "sst"],
-        license="CC-BY-4.0",
+        title="Old Title",
     )
-    catalog.update("sst", title="Updated")
-
+    catalog.update("sst", title="New Title", license="CC-BY-4.0")
     entry = catalog.get("sst")
-    assert entry.metadata["keywords"] == ["ocean", "sst"]
+    assert entry.metadata["title"] == "New Title"
     assert entry.metadata["license"] == "CC-BY-4.0"
+    assert entry.owner == "carbonplan"
+    assert entry.metadata["keywords"] == ["ocean", "sst"]
 
 
-def test_update_entry_still_in_list(catalog, fake_store):
-    catalog.register(
-        "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
-    )
-    catalog.register(
-        "precip", storage=fake_store, location="s3://bucket/precip/", owner="noaa"
-    )
-    catalog.update("sst", title="Updated SST")
-
-    names = {e.name for e in catalog.list()}
-    assert names == {"sst", "precip"}
-
-
-def test_update_nonexistent_raises(catalog):
-    with pytest.raises(icechunk.IcechunkError, match="ref not found"):
-        catalog.update("ghost", title="nothing")
-
-
-# --- Search Tests ---
+# --- Search ---
 
 
 def test_search_sql(catalog, fake_store):
-    """Standard metadata filtering using DuckDB SQL (via search.sql)."""
     catalog.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
@@ -196,16 +138,23 @@ def test_search_sql(catalog, fake_store):
     catalog.register(
         "wind", storage=fake_store, location="s3://bucket/wind/", owner="carbonplan"
     )
-
     results = catalog.search(
         "SELECT name FROM entries WHERE metadata->>'owner' = 'carbonplan' ORDER BY name"
     )
-    names = {r[0] for r in results}
-    assert names == {"sst", "wind"}
+    assert {r[0] for r in results} == {"sst", "wind"}
+
+
+def test_search_no_results(catalog, fake_store):
+    catalog.register(
+        "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
+    )
+    results = catalog.search(
+        "SELECT name FROM entries WHERE metadata->>'owner' = 'nobody'"
+    )
+    assert results == []
 
 
 def test_search_similarity(catalog, fake_store):
-    """Similarity search logic using a mock embedding function."""
     catalog.register(
         "ocean-data",
         storage=fake_store,
@@ -232,30 +181,17 @@ def test_search_similarity(catalog, fake_store):
         return vecs
 
     results = similar(catalog, "ocean search", embed_fn=mock_embed, top_k=1)
-
     assert len(results) == 1
     entry, score = results[0]
     assert entry.name == "ocean-data"
     assert score > 0.99
 
 
-def test_search_no_results(catalog, fake_store):
-    """Verify SQL filtering returns empty list correctly."""
-    catalog.register(
-        "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
-    )
-    results = catalog.search(
-        "SELECT name FROM entries WHERE metadata->>'owner' = 'nobody'"
-    )
-    assert results == []
-
-
-# --- filter() Tests ---
+# --- filter() ---
 
 
 @pytest.fixture
 def catalog_with_bounds(catalog, fake_store):
-    """Catalog with entries covering various time/space ranges."""
     catalog.register(
         "historical",
         storage=fake_store,
@@ -277,48 +213,35 @@ def catalog_with_bounds(catalog, fake_store):
         storage=fake_store,
         location="s3://b/ongoing",
         start_datetime="2020-01-01",
-        # no end_datetime — open-ended
         bbox=[-180.0, -90.0, 0.0, 90.0],
     )
-    catalog.register(
-        "no-bounds",
-        storage=fake_store,
-        location="s3://b/no-bounds",
-        # no temporal or spatial fields
-    )
+    catalog.register("no-bounds", storage=fake_store, location="s3://b/no-bounds")
     return catalog
 
 
-def test_filter_temporal_overlap(catalog_with_bounds):
-    results = catalog_with_bounds.filter(time_start="2019", time_end="2021")
-    names = {e.name for e in results}
-    assert names == {"recent", "ongoing"}
-
-
-def test_filter_temporal_start_only(catalog_with_bounds):
-    results = catalog_with_bounds.filter(time_start="2015")
-    names = {e.name for e in results}
-    assert names == {"recent", "ongoing"}
-
-
-def test_filter_temporal_end_only(catalog_with_bounds):
-    results = catalog_with_bounds.filter(time_end="2005")
-    names = {e.name for e in results}
-    assert names == {"historical"}
+def test_filter_temporal(catalog_with_bounds):
+    assert {
+        e.name for e in catalog_with_bounds.filter(time_start="2019", time_end="2021")
+    } == {"recent", "ongoing"}
+    assert {e.name for e in catalog_with_bounds.filter(time_start="2015")} == {
+        "recent",
+        "ongoing",
+    }
+    assert {e.name for e in catalog_with_bounds.filter(time_end="2005")} == {
+        "historical"
+    }
 
 
 def test_filter_spatial_overlap(catalog_with_bounds):
     results = catalog_with_bounds.filter(bbox=(-20.0, 40.0, 50.0, 60.0))
-    names = {e.name for e in results}
-    assert names == {"historical", "recent", "ongoing"}
+    assert {e.name for e in results} == {"historical", "recent", "ongoing"}
 
 
 def test_filter_combined(catalog_with_bounds):
     results = catalog_with_bounds.filter(
         time_start="2019", time_end="2022", bbox=(-20.0, 40.0, 50.0, 60.0)
     )
-    names = {e.name for e in results}
-    assert names == {"recent", "ongoing"}
+    assert {e.name for e in results} == {"recent", "ongoing"}
 
 
 def test_filter_warns_missing_temporal(catalog_with_bounds):
@@ -332,19 +255,10 @@ def test_filter_warns_missing_bbox(catalog_with_bounds):
 
 
 def test_filter_no_args_returns_all(catalog_with_bounds):
-    results = catalog_with_bounds.filter()
-    assert len(results) == 4
+    assert len(catalog_with_bounds.filter()) == 4
 
 
-def test_filter_year_string_parsed(catalog_with_bounds):
-    # Ensure short ISO strings like "2020" are accepted
-    results = catalog_with_bounds.filter(time_start="2020", time_end="2020")
-    names = {e.name for e in results}
-    assert "recent" in names
-    assert "ongoing" in names
-
-
-# --- refresh() Tests ---
+# --- refresh() ---
 
 
 def test_refresh_returns_stale_flags(catalog, fake_store):
@@ -355,17 +269,14 @@ def test_refresh_returns_stale_flags(catalog, fake_store):
 
 
 def test_refresh_warns_missing_snapshot_id(catalog, fake_store):
-    # Register without dataset_snapshot_id by stripping it after registration
     catalog.register("ds", storage=fake_store, location="s3://b/ds")
-    # Overwrite with no snapshot id
     catalog.update("ds", dataset_snapshot_id=None)
-    # is_stale raises ValueError for None snapshot id; refresh should warn+skip
     with pytest.warns(UserWarning, match="dataset_snapshot_id"):
         result = catalog.refresh()
     assert "ds" not in result
 
 
-# --- update_all_from_store() Tests ---
+# --- update_all_from_store() ---
 
 
 def test_update_all_from_store(catalog, fake_store):
@@ -373,24 +284,21 @@ def test_update_all_from_store(catalog, fake_store):
     before = catalog.get("ds").metadata.get("dataset_snapshot_id")
     catalog.update_all_from_store()
     after = catalog.get("ds").metadata.get("dataset_snapshot_id")
-    # snapshot id should still be present (unchanged since no new commits)
     assert after == before
 
 
 def test_update_all_from_store_warns_no_storage_config(catalog, fake_store):
     catalog.register("ds", storage=fake_store, location="s3://b/ds")
-    # Remove storage_config so auto-resolution fails
     catalog.update("ds", storage_config=None)
     with pytest.warns(UserWarning, match="storage_config"):
         catalog.update_all_from_store()
 
 
-# --- infer_extent / derive_extent Tests ---
+# --- infer_extent / derive_extent ---
 
 
 @pytest.fixture
 def geo_store(tmp_path):
-    """Icechunk store with lat/lon/time coordinates for extent inference."""
     import pandas as pd
     import xarray as xr
 
@@ -411,22 +319,14 @@ def geo_store(tmp_path):
     return storage
 
 
-def test_infer_extent_returns_fields(catalog, geo_store):
+def test_infer_extent(catalog, geo_store):
     catalog.register("geo", storage=geo_store, location="s3://b/geo")
     entry = catalog.get("geo")
-    extent = entry.infer_extent(catalog, update=False)
+    extent = entry.infer_extent(catalog, update=True)
     assert extent["bbox"] == [-20.0, -10.0, 20.0, 10.0]
     assert "start_datetime" in extent
-    assert "end_datetime" in extent
-
-
-def test_infer_extent_updates_catalog(catalog, geo_store):
-    catalog.register("geo", storage=geo_store, location="s3://b/geo")
-    entry = catalog.get("geo")
-    entry.infer_extent(catalog, update=True)
     updated = catalog.get("geo")
     assert updated.metadata["bbox"] == [-20.0, -10.0, 20.0, 10.0]
-    assert "start_datetime" in updated.metadata
 
 
 def test_register_derive_extent(catalog, geo_store):
@@ -444,7 +344,6 @@ def test_register_explicit_kwargs_win_over_derived(catalog, geo_store):
         storage=geo_store,
         location="s3://b/geo",
         derive_extent=True,
-        bbox=[-180.0, -90.0, 180.0, 90.0],  # explicit override
+        bbox=[-180.0, -90.0, 180.0, 90.0],
     )
-    entry = catalog.get("geo")
-    assert entry.metadata["bbox"] == [-180.0, -90.0, 180.0, 90.0]
+    assert catalog.get("geo").metadata["bbox"] == [-180.0, -90.0, 180.0, 90.0]

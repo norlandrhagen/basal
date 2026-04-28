@@ -138,6 +138,29 @@ def storage_from_config(config: dict) -> icechunk.Storage:
     )
 
 
+def _virtual_chunk_container_to_config(vc: Any) -> dict:
+    """Serialize a VirtualChunkContainer object to a config dict.
+
+    Extracts url_prefix, region, anonymous, and endpoint_url directly from
+    the container's ObjectStoreConfig — no string parsing.
+    """
+    url_prefix = vc.url_prefix
+    scheme = urlparse(url_prefix).scheme
+    if scheme == "s3":
+        opts = vc.store[0]  # S3Options
+        result: dict = {"url_prefix": url_prefix}
+        if opts.region:
+            result["region"] = opts.region
+        result["anonymous"] = bool(opts.anonymous)
+        if opts.endpoint_url:
+            result["endpoint_url"] = opts.endpoint_url
+        return result
+    raise NotImplementedError(
+        f"Virtual chunk container scheme {scheme!r} not yet supported for "
+        "serialization. Pass config= explicitly at read time."
+    )
+
+
 def _object_store_config_from_virtual_chunk_dict(c: dict) -> icechunk.ObjectStoreConfig:
     """Build an ObjectStoreConfig from a virtual chunk container config dict."""
     url_prefix = c["url_prefix"]
@@ -155,19 +178,13 @@ def _object_store_config_from_virtual_chunk_dict(c: dict) -> icechunk.ObjectStor
     )
 
 
-def repo_config_from_virtual_chunks(
+def _repo_config_from_virtual_chunks(
     containers: list[dict],
 ) -> icechunk.RepositoryConfig:
-    """Build a RepositoryConfig with VirtualChunkContainers from config dicts.
+    """Build a RepositoryConfig with VirtualChunkContainers from serialized config dicts.
 
-    Each dict should have:
-      url_prefix: str   — e.g. "s3://bucket/"
-      region: str       — optional
-      anonymous: bool   — optional, default False
-      endpoint_url: str — optional
-
-    This is the write-time config needed to create refs to external chunks.
-    For read-time credentials use virtual_chunk_credentials_from_config().
+    Internal — used to reconstruct RepositoryConfig from stored catalog metadata.
+    Each dict: {url_prefix, region?, anonymous?, endpoint_url?}.
     """
     config = icechunk.RepositoryConfig.default()
     for c in containers:
@@ -177,17 +194,13 @@ def repo_config_from_virtual_chunks(
     return config
 
 
-def virtual_chunk_credentials_from_config(
+def _virtual_chunk_credentials_from_config(
     containers: list[dict],
 ) -> icechunk.credentials.Credentials | None:
-    """Build authorize_virtual_chunk_access credentials from container config dicts.
+    """Build authorize_virtual_chunk_access credentials from stored container config dicts.
 
-    Each dict should have:
-      url_prefix: str   — e.g. "s3://bucket/"
-      anonymous: bool   — if True, use anonymous credentials
-      (if False/absent, use from-env credentials)
-
-    This is the read-time credential map passed to Repository.open().
+    Internal — used to reconstruct credentials from stored catalog metadata.
+    Each dict: {url_prefix, anonymous?}.
     """
     if not containers:
         return None
@@ -221,8 +234,8 @@ def default_virtual_chunk_credentials(
 ) -> icechunk.credentials.Credentials | None:
     """Build anonymous credentials for virtual chunk containers.
 
-    Accepts both legacy string prefixes (treated as anonymous) and
-    new-style config dicts from virtual_chunk_containers_config.
+    Accepts both string prefixes (treated as anonymous) and config dicts
+    from stored virtual_chunk_containers_config metadata.
     Returns None if containers is empty.
     """
     if not containers:
@@ -231,7 +244,7 @@ def default_virtual_chunk_credentials(
         {"url_prefix": c, "anonymous": True} if isinstance(c, str) else c
         for c in containers
     ]
-    return virtual_chunk_credentials_from_config(configs)
+    return _virtual_chunk_credentials_from_config(configs)
 
 
 def storage_from_location(location: str, **kwargs: Any) -> icechunk.Storage:

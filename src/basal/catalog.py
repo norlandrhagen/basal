@@ -119,7 +119,6 @@ class IcechunkCatalog:
         branch: str = "main",
         config: icechunk.RepositoryConfig | None = None,
         storage_config: dict | None = None,
-        virtual_chunk_containers_config: list[dict] | None = None,
         derive_extent: bool = False,
         **metadata: Any,
     ) -> None:
@@ -138,14 +137,11 @@ class IcechunkCatalog:
             Optional serializable dict overriding the auto-derived storage config.
             Useful for private stores where from_env credentials must be recorded
             explicitly to enable no-arg to_xarray() at read time.
-        virtual_chunk_containers_config:
-            List of dicts describing virtual chunk containers for stores that
-            reference external chunks. Each dict: {url_prefix, region, anonymous}.
-            Enables automatic RepositoryConfig and credential reconstruction.
-            Use repo_config_from_virtual_chunks() to build the RepositoryConfig.
         config:
-            Optional RepositoryConfig — overrides virtual_chunk_containers_config
-            for this registration call only (not persisted).
+            Optional icechunk.RepositoryConfig. Required for stores with virtual
+            chunks — basal serializes the VirtualChunkContainer settings so
+            to_xarray() can reconstruct config and credentials automatically.
+            Build with icechunk.RepositoryConfig and set_virtual_chunk_container().
         derive_extent:
             If True, read coordinate arrays to auto-populate ``bbox``,
             ``start_datetime``, and ``end_datetime``. Reads 1-D coord arrays
@@ -154,7 +150,11 @@ class IcechunkCatalog:
             Arbitrary metadata fields. Common optional fields: owner, title,
             license, tags. Pass location= to override the auto-derived URL.
         """
-        from .storage import storage_to_config, storage_to_location
+        from .storage import (
+            _virtual_chunk_container_to_config,
+            storage_to_config,
+            storage_to_location,
+        )
 
         _validate_name(name)
 
@@ -167,24 +167,14 @@ class IcechunkCatalog:
             storage
         )
 
-        # Auto-build virtual_chunk_containers_config when virtual chunks are detected
-        # but no explicit config was provided. Infers region from storage_config and
-        # defaults to anonymous=True — covers the common case where virtual chunks live
-        # in the same publicly-readable bucket as the icechunk store.
-        if virtual_chunk_containers_config is None and derived.get(
-            "virtual_chunk_containers"
-        ):
-            region = (
-                derived_storage_config.get("region") if derived_storage_config else None
-            )
-            virtual_chunk_containers_config = [
-                {
-                    "url_prefix": prefix,
-                    **({"region": region} if region else {}),
-                    "anonymous": True,
-                }
-                for prefix in derived["virtual_chunk_containers"]
-            ]
+        # Serialize VirtualChunkContainer details from config when provided.
+        virtual_chunk_containers_config = None
+        if config is not None:
+            containers = config.virtual_chunk_containers
+            if containers:
+                virtual_chunk_containers_config = [
+                    _virtual_chunk_container_to_config(vc) for vc in containers.values()
+                ]
 
         entry_meta: dict[str, Any] = {
             "location": derived_location,
