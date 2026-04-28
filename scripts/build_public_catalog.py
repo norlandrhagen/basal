@@ -1,6 +1,5 @@
 import icechunk
 from basal import IcechunkCatalog
-from basal.storage import repo_config_from_virtual_chunks
 
 # ---------------------------------------------------------------------------
 # Catalog storage — writers need credentials; readers get anon access via CDN
@@ -30,9 +29,9 @@ def _dynamical(bucket: str, prefix: str) -> icechunk.Storage:
 
 
 def _icechunk_public(prefix: str) -> icechunk.Storage:
-    """icechunk-public-data bucket: us-west-2, anonymous S3."""
+    """icechunk-public-data bucket: us-east-1, anonymous S3."""
     return icechunk.s3_storage(
-        bucket="icechunk-public-data", prefix=prefix, region="us-west-2", anonymous=True
+        bucket="icechunk-public-data", prefix=prefix, region="us-east-1", anonymous=True
     )
 
 
@@ -62,8 +61,14 @@ _CARBONPLAN_VC_STORAGE_CONFIG = {
     "anonymous": True,
 }
 
-_CARBONPLAN_VC_CONFIG = repo_config_from_virtual_chunks(
-    [{"url_prefix": "s3://carbonplan-share/", "region": "us-west-2", "anonymous": True}]
+_CARBONPLAN_VC_CONFIG = icechunk.RepositoryConfig.default()
+_CARBONPLAN_VC_CONFIG.set_virtual_chunk_container(
+    icechunk.VirtualChunkContainer(
+        "s3://carbonplan-share/",
+        store=icechunk.ObjectStoreConfig.S3(
+            icechunk.S3Options(region="us-west-2", anonymous=True)
+        ),
+    )
 )
 
 
@@ -638,25 +643,5 @@ registry = [
 # ---------------------------------------------------------------------------
 
 for ds in registry:
-    name = ds.pop("name")
-    storage = ds.pop("storage")
-    storage_config = ds.pop("storage_config", None)
-    config = ds.pop("config", None)
-    derive_extent = ds.pop("derive_extent", False)
-
-    try:
-        catalog.register(
-            name=name,
-            storage=storage,
-            storage_config=storage_config,
-            config=config,
-            derive_extent=derive_extent,
-            **ds,
-        )
-        print(f"registered  {name}")
-    except ValueError as e:
-        if "already registered" in str(e):
-            catalog.update(name, **ds)
-            print(f"updated     {name}")
-        else:
-            raise
+    action = catalog.register_or_update(**ds)
+    print(f"{action:<12} {ds['name']}")

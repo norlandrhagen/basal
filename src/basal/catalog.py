@@ -204,6 +204,40 @@ class IcechunkCatalog:
             allow_empty=True,
         )
 
+    def register_or_update(
+        self,
+        name: str,
+        storage: icechunk.Storage,
+        format: str = "icechunk",
+        branch: str = "main",
+        config: icechunk.RepositoryConfig | None = None,
+        storage_config: dict | None = None,
+        derive_extent: bool = False,
+        **metadata: Any,
+    ) -> str:
+        """Register a dataset, or update its metadata if already registered.
+
+        Accepts the same arguments as register(). Returns "registered" or
+        "updated" — useful for logging in bulk registration scripts.
+        """
+        try:
+            self.register(
+                name,
+                storage=storage,
+                format=format,
+                branch=branch,
+                config=config,
+                storage_config=storage_config,
+                derive_extent=derive_extent,
+                **metadata,
+            )
+            return "registered"
+        except ValueError as e:
+            if "already registered" in str(e):
+                self.update(name, **metadata)
+                return "updated"
+            raise
+
     def update(self, name: str, **fields: Any) -> None:
         """Merge ``fields`` into the current metadata (new values win)."""
         entry = self.get(name)
