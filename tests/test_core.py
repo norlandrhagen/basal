@@ -2,7 +2,7 @@ import icechunk
 import numpy as np
 import pytest
 from basal import IcechunkCatalog
-from basal.search import similar
+from basal.search import similar, similar_by_schema
 
 
 @pytest.fixture
@@ -185,6 +185,74 @@ def test_search_similarity(catalog, fake_store):
     entry, score = results[0]
     assert entry.name == "ocean-data"
     assert score > 0.99
+
+
+def test_similar_by_schema(catalog, fake_store, monkeypatch):
+    catalog.register("precip-data", storage=fake_store, location="s3://b/pr")
+    catalog.register("temp-data", storage=fake_store, location="s3://b/tas")
+
+    fake_infos = {
+        "precip-data": {
+            "global_attrs": {"title": "Precipitation dataset", "institution": "NOAA"},
+            "variables": {
+                "pr": {
+                    "dtype": "float32",
+                    "shape": [100, 180, 360],
+                    "dims": ["time", "lat", "lon"],
+                    "attrs": {"units": "kg m-2 s-1", "long_name": "Precipitation flux"},
+                }
+            },
+            "coords": {},
+        },
+        "temp-data": {
+            "global_attrs": {"title": "Temperature dataset", "institution": "ECMWF"},
+            "variables": {
+                "tas": {
+                    "dtype": "float32",
+                    "shape": [100, 180, 360],
+                    "dims": ["time", "lat", "lon"],
+                    "attrs": {"units": "K", "long_name": "Air temperature"},
+                }
+            },
+            "coords": {},
+        },
+    }
+
+    import basal.search as search_mod
+
+    def mock_fetch(entry):
+        return entry.name, fake_infos[entry.name]
+
+    monkeypatch.setattr(search_mod, "_fetch_store_info", mock_fetch)
+    monkeypatch.setattr(search_mod, "_schema_cache", {})
+
+    def mock_embed(texts):
+        vecs = []
+        for t in texts:
+            t = t.lower()
+            if any(w in t for w in ["precipitation", "rain", "pr", "kg"]):
+                vecs.append(np.array([1.0, 0.0], dtype=np.float32))
+            else:
+                vecs.append(np.array([0.0, 1.0], dtype=np.float32))
+        return vecs
+
+    results = similar_by_schema(
+        catalog, "precipitation flux", embed_fn=mock_embed, top_k=1
+    )
+    assert len(results) == 1
+    assert results[0][0].name == "precip-data"
+    assert results[0][1] > 0.99
+
+    # pre_filter: only datasets with variable_name = 'tas'
+    results_filtered = similar_by_schema(
+        catalog,
+        "precipitation flux",
+        pre_filter="variable_name = 'tas'",
+        embed_fn=mock_embed,
+        top_k=5,
+    )
+    assert len(results_filtered) == 1
+    assert results_filtered[0][0].name == "temp-data"
 
 
 # --- filter() ---

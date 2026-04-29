@@ -395,11 +395,31 @@ class IcechunkCatalog:
         query: str,
         embed_fn=None,
         top_k: int = 5,
+        use_schema: bool = False,
+        pre_filter: str | None = None,
     ) -> list[tuple]:
         """Find entries most similar to a free-text query using vector cosine similarity.
 
         Shorthand for similar(catalog, query). Requires basal[search].
+
+        Parameters
+        ----------
+        use_schema
+            If True, lazily fetches the full zarr schema from each registered store
+            (all da.attrs, coord attrs, global_attrs) for richer embeddings. Results
+            are cached in-memory by snapshot_id. Ignored when False (default), which
+            uses only the CF attrs cached at registration time.
+        pre_filter
+            DuckDB SQL WHERE clause on the variable-level schema table. Only used
+            when use_schema=True. See similar_by_schema() for available columns.
         """
+        if use_schema:
+            from .search import similar_by_schema
+
+            return similar_by_schema(
+                self, query, pre_filter=pre_filter, embed_fn=embed_fn, top_k=top_k
+            )
+
         from .search import similar
 
         return similar(self, query, embed_fn=embed_fn, top_k=top_k)

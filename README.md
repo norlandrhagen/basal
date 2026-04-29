@@ -512,19 +512,33 @@ results = catalog.search("high resolution precipitation radar CONUS", top_k=3)
 #  (Entry(name='noaa-hrrr-analysis', ...), 0.73),
 #  (Entry(name='noaa-hrrr-forecast', ...), 0.70)]
 
-# Or use the standalone function with a custom embed_fn: list[str] -> list[list[float]]
-from basal.search import similar
+# Richer embeddings: lazily fetch full zarr schema from each store (all da.attrs,
+# coord attrs, global_attrs) instead of only the CF subset cached at registration.
+# Results cached in-memory by snapshot_id — fast after the first call.
+results = catalog.search("high resolution precipitation radar CONUS", use_schema=True, top_k=3)
+
+# Pre-filter with DuckDB SQL on the variable-level schema table before embedding —
+# reduces N before the expensive embedding step.
+results = catalog.search(
+    "precipitation flux",
+    use_schema=True,
+    pre_filter="variable_name = 'pr' AND list_contains(dims, 'lat')",
+    top_k=5,
+)
+
+# Or use the standalone functions with a custom embed_fn: list[str] -> list[list[float]]
+from basal.search import similar, similar_by_schema
 from fastembed import TextEmbedding
 model = TextEmbedding("BAAI/bge-small-en-v1.5")
-results = similar(
-    catalog,
-    "sea surface temperature",
-    embed_fn=lambda texts: list(model.embed(texts)),
-    top_k=3,
-)
+embed = lambda texts: list(model.embed(texts))
+
+results = similar(catalog, "sea surface temperature", embed_fn=embed, top_k=3)
+results = similar_by_schema(catalog, "sea surface temperature", embed_fn=embed, top_k=3)
 ```
 
-`similar()` uses DuckDB `array_cosine_similarity` — no external vector DB. All metadata fields (including arbitrary kwargs) are automatically included in the embedding text.
+Both use DuckDB `array_cosine_similarity` — no external vector DB. `similar()` is fast but uses only cached CF attrs. `similar_by_schema()` fetches full zarr attrs from each store in parallel and produces richer embeddings; subsequent calls use the in-memory cache and are equally fast.
+
+`pre_filter` columns (schema table): `dataset_name VARCHAR`, `variable_name VARCHAR`, `dtype VARCHAR`, `dims list<utf8>`, `shape list<int64>`, `chunks list<int64>`, `attrs JSON`, `global_attrs JSON`.
 
 Find what else in the catalog resembles a known entry — same variables, similar domain, related coverage:
 
