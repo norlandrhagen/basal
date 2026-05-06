@@ -4,7 +4,8 @@ A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) w
 
 
 `*basal` as in, the bottom layer of an icesheet, not the herb.
-** Warning, super experimental** may change at an time. 
+
+### WARNING, super experimental. may change at any time. 
 
 
 ## Concept
@@ -683,3 +684,7 @@ Use `catalog.summary()` to see which recommended fields are missing across your 
 
 - How will this scale? 
     - No idea, this would be great to figure out the limits. Maybe this is where you could federate catalogs. 
+
+
+## To Do:
+Dynamical provides a really nice STAC catalog. We could try an import/export conversion. 

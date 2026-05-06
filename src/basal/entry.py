@@ -192,6 +192,14 @@ class Entry:
 
         Requires dataset_snapshot_id to be recorded — raises ValueError otherwise.
         """
+        # Virtual stores reference external files (e.g. NetCDF) that can change
+        # on disk without updating the icechunk snapshot — is_stale() would miss that.
+        if self.virtual_chunk_containers:
+            raise NotImplementedError(
+                f"Entry {self.name!r} is a virtual store. is_stale() compares icechunk "
+                "snapshots, but source files may have changed without a new snapshot. "
+                "Check source file modification times manually."
+            )
         catalogued = self.metadata.get("dataset_snapshot_id")
         if not catalogued:
             raise ValueError(

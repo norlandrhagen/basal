@@ -589,7 +589,7 @@ class IcechunkCatalog:
         for entry in self.list():
             try:
                 results[entry.name] = entry.is_stale()
-            except ValueError:
+            except (ValueError, NotImplementedError):
                 skipped.append(entry.name)
 
         if skipped:
