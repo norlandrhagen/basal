@@ -204,6 +204,72 @@ class IcechunkCatalog:
             allow_empty=True,
         )
 
+    def register_zarr(
+        self,
+        name: str,
+        location: str,
+        store_config: dict | None = None,
+        derive_extent: bool = False,
+        **metadata: Any,
+    ) -> None:
+        """Register a plain Zarr store (not Icechunk).
+
+        Unlike ``register()``, this accepts a URI string and optional obstore
+        ``store_config`` dict instead of an ``icechunk.Storage``. Uses obstore
+        as the cloud backend — no gcsfs or s3fs required.
+
+        Icechunk-specific features (``is_stale()``, ``open_repo()``,
+        ``open_session()``, ``last_data_updated()``) are not available for
+        zarr entries. Use ``to_xarray()`` to open the store.
+
+        Parameters
+        ----------
+        location:
+            URI to the Zarr store. Supported: ``s3://``, ``gs://`` / ``gcs://``,
+            ``az://`` / ``abfs://``, or a local path.
+        store_config:
+            Obstore config dict — forwarded to the cloud store constructor's
+            ``config=`` parameter. Use ``{"skip_signature": True}`` for
+            public/anonymous access. See obstore docs for provider-specific keys.
+        derive_extent:
+            If True, read coordinate arrays to auto-populate ``bbox``,
+            ``start_datetime``, and ``end_datetime``.
+        **metadata:
+            Arbitrary metadata fields (owner, title, license, tags, …).
+        """
+        from .inspect import inspect_zarr_store, stable_attrs
+
+        _validate_name(name)
+
+        info = inspect_zarr_store(
+            location, store_config=store_config, derive_extent=derive_extent
+        )
+        derived = stable_attrs(info)
+
+        entry_meta: dict[str, Any] = {
+            "location": location,
+            "format": "zarr",
+            **derived,
+            **metadata,
+        }
+        if store_config:
+            entry_meta["store_config"] = store_config
+        validate(entry_meta)
+
+        if name in self._repo.list_branches():
+            raise ValueError(
+                f"Dataset '{name}' already registered. Use deregister first."
+            )
+
+        main_snap = self._repo.lookup_branch("main")
+        self._repo.create_branch(name, main_snap)
+        session = self._repo.writable_session(name)
+        session.commit(
+            f"register {name}",
+            metadata={**entry_meta, EVENT_KEY: "registered"},
+            allow_empty=True,
+        )
+
     def register_or_update(
         self,
         name: str,

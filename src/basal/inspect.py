@@ -153,6 +153,56 @@ def inspect_store(
     return result
 
 
+def inspect_zarr_store(
+    location: str,
+    store_config: dict | None = None,
+    derive_extent: bool = False,
+) -> dict[str, Any]:
+    """Read zarr metadata from a plain Zarr store. No chunk data read.
+
+    Uses obstore as the cloud backend (no gcsfs/s3fs required).
+    Returns a dict with the same shape as inspect_store() minus
+    ``dataset_snapshot_id`` and ``virtual_chunk_containers``.
+    """
+    import xarray as xr
+
+    from .zarr_store import build_zarr_store
+
+    store = build_zarr_store(location, store_config)
+    ds = xr.open_zarr(store, consolidated=False)
+
+    result: dict[str, Any] = {}
+    result["global_attrs"] = dict(ds.attrs)
+    result["dims"] = dict(ds.sizes)
+
+    variables = {}
+    for name, da in ds.data_vars.items():
+        entry: dict[str, Any] = {
+            "dtype": str(da.dtype),
+            "shape": list(da.shape),
+            "dims": list(da.dims),
+            "attrs": dict(da.attrs),
+        }
+        if da.encoding.get("chunks"):
+            entry["chunks"] = list(da.encoding["chunks"])
+        variables[str(name)] = entry
+    result["variables"] = variables
+
+    result["coords"] = {
+        str(name): {
+            "dtype": str(da.dtype),
+            "shape": list(da.shape),
+            "attrs": dict(da.attrs),
+        }
+        for name, da in ds.coords.items()
+    }
+
+    if derive_extent:
+        result.update(extract_extent(ds))
+
+    return result
+
+
 def stable_attrs(info: dict[str, Any]) -> dict[str, Any]:
     """Extract the subset of inspect_store output safe to store eagerly in the catalog.
 

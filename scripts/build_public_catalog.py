@@ -639,9 +639,83 @@ registry = [
 
 
 # ---------------------------------------------------------------------------
+# Plain Zarr entries (not Icechunk) — registered via register_zarr()
+# ---------------------------------------------------------------------------
+
+zarr_registry = [
+    {
+        "name": "arco-era5-full",
+        "location": "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+        "store_config": {"skip_signature": True},
+        "owner": "google-research",
+        "title": "ARCO-ERA5 Full (37-level hourly)",
+        "description": (
+            "Analysis-Ready, Cloud Optimized ERA5 reanalysis from Google Research. "
+            "Full 37-pressure-level archive at 0.25° global, 1-hourly from 1940 to present. "
+            "Plain Zarr v3 on GCS — requires gcsfs to open. "
+            "Use the Icechunk entry 'era5-weatherbench2' for snapshot-pinnable ERA5 (subset)."
+        ),
+        "variables": [
+            "2m_temperature",
+            "2m_dewpoint_temperature",
+            "10m_u_component_of_wind",
+            "10m_v_component_of_wind",
+            "mean_sea_level_pressure",
+            "total_precipitation",
+            "geopotential",
+            "temperature",
+            "u_component_of_wind",
+            "v_component_of_wind",
+            "specific_humidity",
+            "vertical_velocity",
+            "total_cloud_cover",
+            "sea_surface_temperature",
+            "sea_ice_cover",
+            "surface_pressure",
+        ],
+        "spatial_resolution": "0.25 degrees (~20km)",
+        "domain": "Global",
+        "bbox": _GLOBAL_BBOX,
+        "start_datetime": "1940-01-01",
+        "temporal_coverage": "1940-01-01 to present",
+        "update_frequency": "Hourly (updated periodically)",
+        "license": "CC-BY-4.0",
+        "source": "ECMWF ERA5 via Google Research ARCO-ERA5 (gcp-public-data-arco-era5)",
+        "tags": [
+            "global",
+            "reanalysis",
+            "era5",
+            "ecmwf",
+            "37-level",
+            "hourly",
+            "0.25deg",
+            "arco",
+            "gcs",
+        ],
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 # Registration loop
 # ---------------------------------------------------------------------------
 
 for ds in registry:
     action = catalog.register_or_update(**ds)
     print(f"{action:<12} {ds['name']}")
+
+for ds in zarr_registry:
+    name = ds["name"]
+    if name in catalog._repo.list_branches():
+        catalog.update(
+            name,
+            **{
+                k: v
+                for k, v in ds.items()
+                if k not in ("name", "location", "storage_options")
+            },
+        )
+        print(f"{'updated':<12} {name}")
+    else:
+        catalog.register_zarr(**ds)
+        print(f"{'registered':<12} {name}")

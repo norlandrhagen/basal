@@ -94,6 +94,14 @@ class Entry:
             return None
         return default_virtual_chunk_credentials(containers)
 
+    def _require_icechunk(self, method: str) -> None:
+        if self.format != "icechunk":
+            raise NotImplementedError(
+                f"{method}() is only available for icechunk entries "
+                f"(this entry has format={self.format!r}). "
+                "Use to_xarray() to open the store directly."
+            )
+
     def _open_dataset_repo(
         self,
         storage: icechunk.Storage | None = None,
@@ -124,6 +132,7 @@ class Entry:
         icechunk-specific APIs (tags, branches, ancestry, etc.).
         # Q: Should we enforce readonly or have an option to switch
         """
+        self._require_icechunk("open_repo")
         return self._open_dataset_repo(storage, config, authorize_virtual_chunk_access)
 
     def open_session(
@@ -143,6 +152,7 @@ class Entry:
             session = entry.open_session()
             ds = xr.open_zarr(session.store, group="1x721x1440", consolidated=False)
         """
+        self._require_icechunk("open_session")
         repo = self._open_dataset_repo(storage, config, authorize_virtual_chunk_access)
         ref_args: dict[str, Any] = {}
         if snapshot_id:
@@ -166,10 +176,12 @@ class Entry:
     ):
         import xarray as xr
 
-        if self.format != "icechunk":
-            raise NotImplementedError(
-                f"to_xarray not supported for format={self.format!r}"
-            )
+        if self.format == "zarr":
+            from .zarr_store import build_zarr_store
+
+            store_config = self.metadata.get("store_config")
+            zarr_store = build_zarr_store(self.location, store_config)
+            return xr.open_zarr(zarr_store, consolidated=False, **(open_kwargs or {}))
 
         session = self.open_session(
             branch=branch,
@@ -192,6 +204,7 @@ class Entry:
 
         Requires dataset_snapshot_id to be recorded — raises ValueError otherwise.
         """
+        self._require_icechunk("is_stale")
         # Virtual stores reference external files (e.g. NetCDF) that can change
         # on disk without updating the icechunk snapshot — is_stale() would miss that.
         if self.virtual_chunk_containers:
@@ -218,6 +231,7 @@ class Entry:
         authorize_virtual_chunk_access: dict | None = None,
     ):
         """Return written_at of current HEAD of dataset store (no chunk IO)."""
+        self._require_icechunk("last_data_updated")
         repo = self._open_dataset_repo(storage, config, authorize_virtual_chunk_access)
         snap_id = repo.lookup_branch(branch)
         info = repo.lookup_snapshot(snap_id)
@@ -230,6 +244,12 @@ class Entry:
         config: icechunk.RepositoryConfig | None = None,
     ) -> dict:
         """Read live zarr metadata from store (no chunk IO)."""
+        if self.format == "zarr":
+            from .inspect import inspect_zarr_store
+
+            store_config = self.metadata.get("store_config")
+            return inspect_zarr_store(self.location, store_config=store_config)
+
         from .inspect import inspect_store
 
         resolved_storage = self._resolve_storage(storage)

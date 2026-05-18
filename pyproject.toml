@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "icechunk>=2.0.3",
+    "obstore>=0.9.4",
     "rich>=13.0.0",
     "xarray>=2026.4.0",
     "zarr>=3.1.6",
@@ -13,6 +14,10 @@ dependencies = [
 
 [project.optional-dependencies]
 search = ["fastembed>=0.2.0", "duckdb>=1.5.2", "arro3-core>=0.1.0"]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12"]
@@ -30,6 +35,7 @@ dev = [
     "ruff>=0.4.0",
     "basal[search]",
     "pytest-xdist>=3.8.0",
+    "gcsfs>=2026.5.0",
 ]
 
 [tool.ruff]

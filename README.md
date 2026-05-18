@@ -24,24 +24,25 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/ ← Icechunk dataset 
 
 ## Public catalog entries
 
-14 public Icechunk datasets at `s3://carbonplan-share/basal/public_icechunk_stores`:
+15 public datasets at `s3://carbonplan-share/basal/public_icechunk_stores` — 14 Icechunk, 1 plain Zarr:
 
-| Entry | Owner | Notes |
-|---|---|---|
-| `carbonplan-nohrsc-snowfall` | carbonplan | Virtual Zarr store |
-| `carbonplan-ocr-fire-risk` | carbonplan | |
-| `dwd-icon-eu` | dynamical.org | |
-| `ecmwf-aifs-single` | dynamical.org | |
-| `ecmwf-ifs-ens` | dynamical.org | |
-| `era5-weatherbench2` | google-research | |
-| `gefs-forecast-35d` | dynamical.org | |
-| `glad-land-cover` | glad | |
-| `noaa-gefs-analysis` | dynamical.org | |
-| `noaa-gfs-analysis` | dynamical.org | |
-| `noaa-gfs-forecast` | dynamical.org | |
-| `noaa-hrrr-analysis` | dynamical.org | |
-| `noaa-hrrr-forecast` | dynamical.org | |
-| `noaa-mrms-hourly` | dynamical.org | |
+| Entry | Owner | Format | Notes |
+|---|---|---|---|
+| `arco-era5-full` | google-research | zarr | Full 37-level hourly ERA5, 1940–present (GCS, obstore backend). |
+| `carbonplan-nohrsc-snowfall` | carbonplan | icechunk | Virtual Zarr store |
+| `carbonplan-ocr-fire-risk` | carbonplan | icechunk | |
+| `dwd-icon-eu` | dynamical.org | icechunk | |
+| `ecmwf-aifs-single` | dynamical.org | icechunk | |
+| `ecmwf-ifs-ens` | dynamical.org | icechunk | |
+| `era5-weatherbench2` | google-research | icechunk | |
+| `gefs-forecast-35d` | dynamical.org | icechunk | |
+| `glad-land-cover` | glad | icechunk | |
+| `noaa-gefs-analysis` | dynamical.org | icechunk | |
+| `noaa-gfs-analysis` | dynamical.org | icechunk | |
+| `noaa-gfs-forecast` | dynamical.org | icechunk | |
+| `noaa-hrrr-analysis` | dynamical.org | icechunk | |
+| `noaa-hrrr-forecast` | dynamical.org | icechunk | |
+| `noaa-mrms-hourly` | dynamical.org | icechunk | |
 
 Locations are stored in catalog metadata — use `catalog.get(name).location` to retrieve.
 
@@ -202,6 +203,61 @@ catalog.deregister("my-dataset")
 `register()` tries to auto extract CF global attrs (`title`, `institution`, `conventions`, `source`),
 per-variable `units`/`long_name`/`standard_name`, and records `dataset_snapshot_id` (the snapshot
 at registration time). Explicit kwargs are proritized higher than anything derived from the store.
+
+### Register a plain Zarr store
+
+For datasets not yet in Icechunk, use `register_zarr()` — takes a URL string and optional
+fsspec `storage_options` instead of an `icechunk.Storage`:
+
+Uses [obstore](https://github.com/developmentseed/obstore) as the cloud backend — no `gcsfs` or `s3fs` needed.
+`store_config` maps to obstore's `config=` parameter (provider-specific key-value pairs):
+
+```python
+catalog.register_zarr(
+    "arco-era5-full",
+    location="gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+    store_config={"skip_signature": True},   # anonymous GCS — obstore config dict
+    owner="google-research",
+    title="ARCO-ERA5 Full (37-level hourly)",
+    bbox=[-180.0, -90.0, 180.0, 90.0],
+    start_datetime="1940-01-01",
+    license="CC-BY-4.0",
+    tags=["global", "reanalysis", "era5", "37-level", "hourly"],
+)
+
+# Same pattern for anonymous S3
+catalog.register_zarr(
+    "my-s3-dataset",
+    location="s3://bucket/path/to/store.zarr",
+    store_config={"skip_signature": True, "region": "us-east-1"},
+)
+```
+
+Open via `to_xarray()` as usual — obstore handles the cloud IO:
+
+```python
+entry = catalog.get("arco-era5-full")
+ds = entry.to_xarray()
+# <xarray.Dataset>
+# Dimensions: (time: 1323648, latitude: 721, longitude: 1440, level: 37)
+# Data variables: 2m_temperature, geopotential, temperature, ...
+```
+
+#### Zarr vs Icechunk entries
+
+Plain Zarr entries trade icechunk-specific features for catalog-ability of any existing store:
+
+| Feature | `format="icechunk"` | `format="zarr"` |
+|---|---|---|
+| `to_xarray()` | ✓ pin to branch / tag / snapshot | ✓ always reads latest |
+| `inspect()` | ✓ | ✓ |
+| `infer_extent()` | ✓ | ✓ |
+| `is_stale()` | ✓ snapshot comparison | ✗ raises `NotImplementedError` |
+| `last_data_updated()` | ✓ HEAD snapshot timestamp | ✗ raises `NotImplementedError` |
+| `open_repo()` / `open_session()` | ✓ | ✗ raises `NotImplementedError` |
+| Staleness tracking | ✓ via `dataset_snapshot_id` | ✗ no snapshot concept |
+
+**Recommendation:** for datasets you control, migrate to Icechunk or wrap with VirtualiZarr — both unlock the full feature set. Use `register_zarr()` for read-only catalog entries over stores you don't own or can't migrate.
 
 ### Virtual datasets (VirtualiZarr)
 
@@ -635,6 +691,57 @@ catalog.update("my-dataset", bbox=[-10.0, 30.0, 40.0, 70.0])
 # geometry is auto-derived and stored alongside bbox
 ```
 
+### STAC API server
+
+Serve the catalog as a live [STAC API](https://github.com/radiantearth/stac-api-spec) — unlocks
+QGIS, EOxHub, and any STAC-aware client. Requires `basal[server]`:
+
+```
+uv add "basal[server]"
+```
+
+**Programmatic** — embed in an existing app:
+
+```python
+from basal.stac_api import create_app
+
+app = create_app(catalog)
+# then: uvicorn mymodule:app --host 0.0.0.0 --port 8000
+```
+
+**CLI** — configure via env vars:
+
+```bash
+BASAL_BUCKET=carbonplan-share \
+BASAL_PREFIX=basal/public_icechunk_stores \
+BASAL_REGION=us-west-2 \
+BASAL_ANONYMOUS=true \
+uvicorn basal.stac_api:app --host 0.0.0.0 --port 8000
+```
+
+Endpoints: `GET /`, `GET /conformance`, `GET /collections`, `GET /collections/{id}`,
+`GET /collections/{id}/items` (paginated via `?token=&limit=`), `GET /collections/{id}/items/{item_id}`,
+`GET /search`, `POST /search` (filter by `bbox`, `datetime`, `ids`). CORS enabled for browser clients.
+
+Entries without `bbox` are served with `null` geometry — valid per STAC spec.
+
+#### STAC browser clients
+
+Any STAC-aware client can discover and browse the catalog once the server is running:
+
+- **[STAC Browser](https://radiantearth.github.io/stac-browser/)** (web) — paste your server URL into the browser, navigate entries, inspect metadata
+- **QGIS** — Plugins → STAC API Browser → add connection → enter server URL
+- **[pystac-client](https://pystac-client.readthedocs.io)** — Python client for programmatic STAC API queries:
+
+  ```python
+  from pystac_client import Client
+  client = Client.open("http://localhost:8000")
+  results = client.search(bbox=[-10, 30, 40, 70], datetime="2020-01-01/2021-01-01")
+  for item in results.items():
+      print(item.id, item.assets)
+  ```
+
+- **EOxHub / Pangeo-Forge intake** — point at the server URL in catalog config
 
 
 ## Metadata schema
@@ -644,11 +751,11 @@ Two fields are required:
 ```python
 {
     "location": "s3://bucket/path/to/icechunk-store/",  # auto-derived from storage
-    "format": "icechunk",                                # default - Note: currently only icechunk is supported
+    "format": "icechunk",                                # "icechunk" or "zarr"
 }
 ```
 
-`name` is a positional argument to `register()`. `owner` is strongly recommended but optional. Both `location` and `format` are always present — `location` is auto-derived from the `storage` object, and `format` defaults to `"icechunk"`.
+`name` is a positional argument to `register()` / `register_zarr()`. `owner` is strongly recommended but optional. Both `location` and `format` are always present — `location` is auto-derived from the `storage` object (icechunk) or passed directly (zarr), and `format` defaults to `"icechunk"`. Supported formats: `"icechunk"`, `"zarr"`.
 
 Everything else is optional and unconstrained — pass any additional kwargs to `register()`. The protocol doesn't own your schema; domain-specific fields live in the free-form blob. See [Register and deregister](#register-and-deregister) for a full example.
 
@@ -679,6 +786,7 @@ Use `catalog.summary()` to see which recommended fields are missing across your 
 - **Storage reads are explicit and bounded.** `register()` reads the dataset store once at registration time to extract CF attrs and snapshot anchor. `update_from_store()` and `entry.inspect()` are explicit re-inspection opt-ins; all other catalog operations are metadata-only.
 - **`derived_from` enables lineage without requiring it.** Pass a list of upstream entry IDs to track provenance.
 - **No server, no database.** The catalog is just an Icechunk repo in object storage. Gives you a non-local catalog that doesn't require running a bunch of infrastructure.
+- **One branch per entry, not one Zarr group per entry.** Branches give independent commit histories per entry and concurrent `register()` calls on different entries never conflict — Icechunk transactions are branch-scoped. `inspect_repo_info()` reads all branch HEADs in a single call, so catalog listing is O(1) regardless of entry count. Zarr groups on a shared branch would serialize concurrent writes and require traversing the store hierarchy to list entries.
 
 ## Open questions
 

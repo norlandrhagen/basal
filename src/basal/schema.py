@@ -4,6 +4,8 @@ from datetime import datetime
 
 REQUIRED_FIELDS = {"location", "format"}
 
+SUPPORTED_FORMATS = {"icechunk", "zarr"}
+
 RECOMMENDED_FIELDS: dict[str, str] = {
     "title": "Human-readable dataset name (STAC properties.title)",
     "owner": "Producing organization or person",
@@ -34,6 +36,11 @@ def validate(metadata: dict) -> None:
     missing = REQUIRED_FIELDS - metadata.keys()
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
+    fmt = metadata.get("format")
+    if fmt not in SUPPORTED_FORMATS:
+        raise ValueError(
+            f"Unsupported format={fmt!r}. Must be one of: {sorted(SUPPORTED_FORMATS)}"
+        )
     if "bbox" in metadata:
         _validate_bbox(metadata["bbox"])
         if "geometry" not in metadata:

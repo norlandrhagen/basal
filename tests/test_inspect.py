@@ -111,3 +111,14 @@ def test_is_stale(tmp_path, dataset_store):
     session.commit("new data", allow_empty=True)
 
     assert catalog.get("sst").is_stale() is True
+
+
+def test_is_stale_virtual_raises(tmp_path, dataset_store):
+    catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
+    catalog = IcechunkCatalog.create(catalog_storage)
+    catalog.register("sst", storage=_storage(dataset_store), owner="test-org")
+    catalog.update("sst", virtual_chunk_containers=["s3://some-bucket/"])
+    entry = catalog.get("sst")
+
+    with pytest.raises(NotImplementedError, match="virtual store"):
+        entry.is_stale()
