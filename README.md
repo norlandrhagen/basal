@@ -206,8 +206,7 @@ at registration time). Explicit kwargs are proritized higher than anything deriv
 
 ### Register a plain Zarr store
 
-For datasets not yet in Icechunk, use `register_zarr()` — takes a URL string and optional
-fsspec `storage_options` instead of an `icechunk.Storage`:
+For datasets not yet in Icechunk, use `register_zarr()` — takes a URL string and optional `storage_options` instead of an `icechunk.Storage`:
 
 Uses [obstore](https://github.com/developmentseed/obstore) as the cloud backend — no `gcsfs` or `s3fs` needed.
 `store_config` maps to obstore's `config=` parameter (provider-specific key-value pairs):
@@ -257,7 +256,7 @@ Plain Zarr entries trade icechunk-specific features for catalog-ability of any e
 | `open_repo()` / `open_session()` | ✓ | ✗ raises `NotImplementedError` |
 | Staleness tracking | ✓ via `dataset_snapshot_id` | ✗ no snapshot concept |
 
-**Recommendation:** for datasets you control, migrate to Icechunk or wrap with VirtualiZarr — both unlock the full feature set. Use `register_zarr()` for read-only catalog entries over stores you don't own or can't migrate.
+**Recommendation:** for datasets you control, migrate to Icechunk or wrap with VirtualiZarr — both unlock the full feature set. Use `register_zarr()` for read-only catalog entries over stores you can't migrate.
 
 ### Virtual datasets (VirtualiZarr)
 

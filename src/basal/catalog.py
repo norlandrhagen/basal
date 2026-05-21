@@ -13,6 +13,11 @@ from .entry import Entry
 from .history import EVENT_KEY, collect_history
 from .schema import validate
 
+warnings.filterwarnings(
+    "ignore",
+    message=".*Numcodecs codecs are not in the Zarr version 3 specification.*",
+)
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 
 
