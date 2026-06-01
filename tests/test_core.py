@@ -1,7 +1,10 @@
+import warnings
+
 import icechunk
 import numpy as np
 import pytest
 from basal import IcechunkCatalog
+from basal import storage as st
 from basal.search import similar, similar_by_schema
 
 
@@ -103,6 +106,40 @@ def test_missing_required_field_raises():
 
     with pytest.raises(ValueError, match="Missing required fields"):
         validate({"location": "s3://bucket/sst/"})
+
+
+def test_validate_layer_hints():
+    from basal.schema import validate
+
+    base = {"location": "s3://bucket/sst/", "format": "icechunk"}
+
+    # valid
+    validate(
+        {**base, "layer_hints": {"t2m": {"colormap": "RdBu_r", "clim": [-40, 40]}}}
+    )
+    validate(
+        {
+            **base,
+            "layer_hints": {"t2m": {"clim": [0, 1]}, "precip": {"colormap": "Blues"}},
+        }
+    )
+    validate({**base, "global_colormap": "viridis"})
+
+    # invalid layer_hints type
+    with pytest.raises(ValueError, match="layer_hints must be a dict"):
+        validate({**base, "layer_hints": "viridis"})
+
+    # invalid per-var type
+    with pytest.raises(ValueError, match="must be a dict"):
+        validate({**base, "layer_hints": {"t2m": "bad"}})
+
+    # invalid clim length
+    with pytest.raises(ValueError, match="clim.*min, max"):
+        validate({**base, "layer_hints": {"t2m": {"clim": [0]}}})
+
+    # invalid global_colormap type
+    with pytest.raises(ValueError, match="global_colormap must be a string"):
+        validate({**base, "global_colormap": 42})
 
 
 # --- Update ---
@@ -415,3 +452,137 @@ def test_register_explicit_kwargs_win_over_derived(catalog, geo_store):
         bbox=[-180.0, -90.0, 180.0, 90.0],
     )
     assert catalog.get("geo").metadata["bbox"] == [-180.0, -90.0, 180.0, 90.0]
+
+
+# --- StorageSpec (WS1) ---
+
+
+def test_storage_spec_roundtrip():
+    from basal.storage import location_from_config, storage_from_config
+
+    spec = st.s3_storage(bucket="b", prefix="p/q", region="us-west-2", anonymous=True)
+    cfg = spec.to_config()
+    assert cfg == {
+        "type": "s3",
+        "bucket": "b",
+        "prefix": "p/q",
+        "region": "us-west-2",
+        "anonymous": True,
+    }
+    # config reconstructs without error and yields the canonical location
+    storage_from_config(cfg)
+    assert location_from_config(cfg) == "s3://b/p/q"
+    assert isinstance(spec.build(), icechunk.Storage)
+
+
+def test_storage_spec_drops_non_serializable_kwargs():
+    # credential objects / unknown kwargs must not leak into to_config()
+    spec = st.s3_storage(bucket="b", prefix="p", credentials=object())
+    cfg = spec.to_config()
+    assert "credentials" not in cfg
+    assert cfg["bucket"] == "b"
+
+
+def test_register_with_storage_spec_no_warning(catalog):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning fails the test
+        catalog.register(
+            "viaspec",
+            storage=st.s3_storage(bucket="b", prefix="viaspec", region="us-west-2"),
+            inspect=False,
+            owner="org",
+        )
+    entry = catalog.get("viaspec")
+    assert entry.location == "s3://b/viaspec"
+    assert entry.metadata["storage_config"]["type"] == "s3"
+
+
+def test_register_raw_storage_warns(catalog, fake_store):
+    with pytest.warns(UserWarning, match="raw icechunk.Storage"):
+        catalog.register("raw", storage=fake_store, location="s3://b/raw")
+
+
+def test_register_raw_storage_with_explicit_config_no_warning(catalog, fake_store):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        catalog.register(
+            "rawcfg",
+            storage=fake_store,
+            location="s3://b/rawcfg",
+            storage_config={"type": "s3", "bucket": "b", "prefix": "rawcfg"},
+        )
+
+
+# --- soft-delete (WS2) ---
+
+
+def test_deregister_is_soft_by_default(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    catalog.deregister("sst")
+    # excluded from list
+    assert not any(e.name == "sst" for e in catalog.list())
+    # get raises unless include_deleted
+    with pytest.raises(KeyError):
+        catalog.get("sst")
+    assert catalog.get("sst", include_deleted=True).name == "sst"
+    # branch retained (history preserved)
+    assert "sst" in catalog._repo.list_branches()
+
+
+def test_deregister_history_shows_event(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    catalog.deregister("sst")
+    events = [(h["event"], h["name"]) for h in catalog.history(name="sst")]
+    assert ("deregistered", "sst") in events
+    assert ("registered", "sst") in events
+
+
+def test_restore(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    catalog.deregister("sst")
+    catalog.restore("sst")
+    assert catalog.get("sst").name == "sst"
+    assert any(e.name == "sst" for e in catalog.list())
+
+
+def test_reregister_over_tombstone(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    catalog.deregister("sst")
+    # re-register the same name succeeds (does not raise "already registered")
+    catalog.register("sst", storage=fake_store, location="s3://b/sst-v2")
+    assert catalog.get("sst").location == "s3://b/sst-v2"
+    assert any(e.name == "sst" for e in catalog.list())
+
+
+def test_register_live_entry_still_raises(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    with pytest.raises(ValueError, match="already registered"):
+        catalog.register("sst", storage=fake_store, location="s3://b/sst-dup")
+
+
+def test_deregister_purge_removes_branch(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    catalog.deregister("sst", purge=True)
+    assert "sst" not in catalog._repo.list_branches()
+
+
+# --- expire (WS3) ---
+
+
+def test_expire_collapses_history_keeps_entries(catalog, fake_store):
+    import datetime
+
+    catalog.register("sst", storage=fake_store, location="s3://b/sst")
+    for i in range(8):
+        catalog.update("sst", rev=i)
+
+    n_before = len(catalog._repo.inspect_repo_info()["snapshots"])
+    catalog.expire(datetime.datetime.now(datetime.UTC))
+    n_after = len(catalog._repo.inspect_repo_info()["snapshots"])
+
+    assert n_after < n_before  # history collapsed
+    # entry survives with its latest metadata intact
+    entry = catalog.get("sst")
+    assert entry.name == "sst"
+    assert entry.metadata["rev"] == 7
+    assert {e.name for e in catalog.list()} == {"sst"}

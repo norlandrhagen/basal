@@ -75,49 +75,22 @@ catalog
 
 # Rich-formatted terminal table
 catalog.print()
-# ┌──────────────────────────────┬──────────────────┬─────────────────────────────────┬─────────────────┐
-# │ name                         │ owner            │ title                           │ location        │
-# ├──────────────────────────────┼──────────────────┼─────────────────────────────────┼─────────────────┤
-# │ carbonplan-nohrsc-snowfall   │ carbonplan       │ NOHRSC National Snowfall …      │ s3://carbonpla… │
-# │ carbonplan-ocr-fire-risk     │ carbonplan       │ Open Climate Risk: Wildfire …   │ s3://us-west-2… │
-# │ dwd-icon-eu                  │ dynamical.org    │ DWD ICON-EU 5-Day Forecast      │ s3://dynamica…  │
-# │ ecmwf-aifs-single            │ dynamical.org    │ ECMWF AIFS Single Forecast      │ s3://dynamica…  │
-# │ ecmwf-ifs-ens                │ dynamical.org    │ ECMWF IFS Ensemble 15-Day …     │ s3://dynamica…  │
-# │ era5-weatherbench2           │ google-research  │ WeatherBench2 ERA5 (subset)     │ s3://icechunk…  │
-# │ gefs-forecast-35d            │ dynamical.org    │ NOAA GEFS 35-Day Extended …     │ s3://dynamica…  │
-# │ glad-land-cover              │ glad             │ GLAD Land Cover and Land Use    │ s3://icechunk…  │
-# │ noaa-gefs-analysis           │ dynamical.org    │ NOAA GEFS Analysis              │ s3://dynamica…  │
-# │ noaa-gfs-analysis            │ dynamical.org    │ NOAA GFS Analysis               │ s3://dynamica…  │
-# │ noaa-gfs-forecast            │ dynamical.org    │ NOAA GFS 16-Day Forecast        │ s3://dynamica…  │
-# │ noaa-hrrr-analysis           │ dynamical.org    │ NOAA HRRR Analysis              │ s3://dynamica…  │
-# │ noaa-hrrr-forecast           │ dynamical.org    │ NOAA HRRR 48-Hour Forecast      │ s3://dynamica…  │
-# │ noaa-mrms-hourly             │ dynamical.org    │ NOAA MRMS CONUS Hourly …        │ s3://dynamica…  │
-# └──────────────────────────────┴──────────────────┴─────────────────────────────────┴─────────────────┘
+# ┌────────────────────────────┬───────────────┬─────────────────────────────┬─────────────────┐
+# │ name                       │ owner         │ title                       │ location        │
+# ├────────────────────────────┼───────────────┼─────────────────────────────┼─────────────────┤
+# │ ecmwf-aifs-single          │ dynamical.org │ ECMWF AIFS Single Forecast  │ s3://dynamica…  │
+# │ …                          │ …             │ …                           │ …               │
+# └────────────────────────────┴───────────────┴─────────────────────────────┴─────────────────┘
 
 # All entries as list
 entries = catalog.list()
-entries
 
 # Single entry
 entry = catalog.get("noaa-gfs-analysis")
 # Entry(name='noaa-gfs-analysis', owner='dynamical.org', location='s3://dynamical-noaa-gfs/...')
 
-# Full metadata panel
+# Full metadata panel (rich.Panel — title, owner, license, variables, snapshot_id, …)
 catalog.describe("ecmwf-aifs-single")
-# ╭─────────────────────── ecmwf-aifs-single ────────────────────────╮
-# │ title             ECMWF AIFS Single Forecast                     │
-# │ owner             dynamical.org                                  │
-# │ format            icechunk                                       │
-# │ location          s3://dynamical-ecmwf-aifs-single/…            │
-# │ license           CC-BY-4.0                                      │
-# │ domain            Global                                         │
-# │ spatial_resolution 0.25 degrees (~20km)                         │
-# │ temporal_coverage 2024-06-01 to present                         │
-# │ update_frequency  Twice daily (00Z, 12Z), 10-day horizon         │
-# │ variables         ['t2m', 'u10', 'v10', 'tp', 'msl', …]        │
-# │ tags              ['global', 'ai', 'ecmwf', 'machine-learning'…] │
-# │ snapshot_id       STSEGF7J69C1J30FRBJG                          │
-# ╰──────────────────────────────────────────────────────────────────╯
 ```
 
 ### Open a dataset
@@ -165,14 +138,17 @@ catalog_storage = icechunk.s3_storage(
 )
 catalog = IcechunkCatalog.open_or_create(catalog_storage)
 
-# 2. Build storage for a dataset — use Icechunk directly so we can pass on all that hard work to Icechunk.
-dataset_storage = icechunk.s3_storage(
+# 2. Build storage for a dataset. Prefer basal.storage.* (StorageSpec) — it captures
+#    the exact construction kwargs, so storage_config is recorded reliably.
+from basal import storage as bstorage
+
+dataset_storage = bstorage.s3_storage(
     bucket="my-data-bucket", prefix="my-dataset.icechunk",
     region="us-west-2",
     anonymous=True,   # public data — or from_env=True for credentialed stores. Check the icechunk docs for more examples.
 )
 
-# 3. Register — location and storage_config are derived from Icechunk Storage.
+# 3. Register — location and storage_config are derived from the StorageSpec.
 catalog.register(
     "my-dataset",
     storage=dataset_storage,
@@ -182,7 +158,17 @@ catalog.register(
 )
 ```
 
-`register()` accepts an `icechunk.Storage` object directly — no URL parsing. It opens the repo via `icechunk.Repository.open()` so Icechunk handles all validation: auth errors, missing stores, version mismatches. `location` and `storage_config` are auto-derived from the storage object and stored in catalog metadata so consumers can call `entry.to_xarray()` with no storage arguments!
+`register()` accepts a `basal.storage` `StorageSpec` (`s3_storage`, `gcs_storage`,
+`local_filesystem_storage`, ...) or a raw `icechunk.Storage`. `location` and
+`storage_config` are auto-derived and stored in catalog metadata so consumers can call
+`entry.to_xarray()` with no storage arguments.
+
+> **Prefer `StorageSpec`.** icechunk exposes no serialization API, so when a raw
+> `icechunk.Storage` is passed, `storage_config` is recovered by parsing `str(storage)`
+> — an undocumented format that can break on an icechunk upgrade. `register()` emits a
+> `UserWarning` in that case. `basal.storage.*` captures the exact kwargs instead and is
+> version-independent. (You can also pass `storage_config=` explicitly to silence the
+> warning.)
 
 
 ### Register and deregister
@@ -197,12 +183,55 @@ catalog.register(
     variables=["temperature"],
 )
 
+# Soft-delete by default: the entry is hidden from list()/get() but its branch and
+# full commit history are retained, so it can be restored or the name re-registered.
 catalog.deregister("my-dataset")
+catalog.restore("my-dataset")          # undo a soft-delete
+catalog.get("my-dataset", include_deleted=True)   # read a tombstoned entry
+
+# Hard-delete: removes the branch and its history. Irreversible.
+catalog.deregister("my-dataset", purge=True)
 ```
 
-`register()` tries to auto extract CF global attrs (`title`, `institution`, `conventions`, `source`),
-per-variable `units`/`long_name`/`standard_name`, and records `dataset_snapshot_id` (the snapshot
-at registration time). Explicit kwargs are proritized higher than anything derived from the store.
+`deregister()` is a soft-delete: it commits a tombstone (a `deregistered` event in
+`history()`) rather than dropping the branch, so the version history survives. `list()`
+and `get()` skip tombstoned entries; re-registering the same name reuses the branch and
+clears the tombstone. Pass `purge=True` for an irreversible hard delete.
+
+`register()` auto-extracts CF global attrs (`title`, `institution`), per-variable semantic attrs
+(`units`, `long_name`, `standard_name`), and records `dataset_snapshot_id` (the snapshot at
+registration time). It also persists flat `var_names`, `coord_names`, and `dim_names` (names only —
+sizes excluded since they grow on time-append). Explicit kwargs are prioritized over anything
+derived from the store. Pass `inspect=False` to skip store IO entirely and supply all metadata
+as kwargs.
+
+#### Layer hints (web viewer / map rendering)
+
+Pass `layer_hints` and `global_colormap` to annotate how variables should be rendered in a
+zarr-layer map viewer. Both fields are optional and stored verbatim in catalog metadata:
+
+```python
+catalog.register(
+    "noaa-gfs-analysis",
+    storage=storage,
+    global_colormap="viridis",           # default colormap for all variables
+    layer_hints={
+        "temperature_2m": {"colormap": "RdBu_r", "clim": [-40, 40]},
+        "wind_speed":      {"clim": [0, 30]},   # inherits global_colormap
+        "precipitation":   {"colormap": "Blues", "clim": [0, 50]},
+    },
+)
+```
+
+Resolution order for a zarr-layer consumer:
+
+```
+colormap:  layer_hints[var].colormap  ??  global_colormap  ??  viewer default
+clim:      layer_hints[var].clim      ??  null
+```
+
+`layer_hints` values are open dicts — any rendering key is valid (`colormap`, `clim`, `opacity`,
+`units_display`, etc.). `clim` must be `[min, max]` when present.
 
 ### Register a plain Zarr store
 
@@ -269,8 +298,9 @@ and credentials automatically at read time:
 
 ```python
 import icechunk
+from basal import storage as bstorage
 
-dataset_storage = icechunk.s3_storage(
+dataset_storage = bstorage.s3_storage(
     bucket="carbonplan-share",
     prefix="basal/examples/virtual_icechunk",
     region="us-west-2",
@@ -519,103 +549,47 @@ catalog.facets()
 #### SQL search (DuckDB)
 
 ```python
-from basal.search import sql, sql_df, sql_arrow
-
-# Via catalog directly
+# Scalar field
 catalog.sql("SELECT name FROM entries WHERE metadata->>'owner' = 'dynamical.org'")
-# [('dwd-icon-eu',), ('ecmwf-aifs-single',), ('ecmwf-ifs-ens',), ...]
-
-# Or use the standalone functions for more return-type control:
-
-# Raw tuples
-sql(catalog, "SELECT name FROM entries WHERE metadata->>'license' = 'CC-BY-4.0' ORDER BY name")
-# [('carbonplan-ocr-fire-risk',), ('dwd-icon-eu',), ('ecmwf-aifs-single',), ...]
-
-# Pandas DataFrame
-sql_df(catalog, "SELECT name, metadata->>'owner' AS owner FROM entries ORDER BY name")
-#                         name             owner
-# 0   carbonplan-ocr-fire-risk        carbonplan
-# 1                dwd-icon-eu     dynamical.org
-# 2          ecmwf-aifs-single     dynamical.org
-# ...
-
-# Filter on list-valued field (tags)
-sql(
-    catalog,
+# List-valued field
+catalog.sql(
     "SELECT name FROM entries "
-    "WHERE list_contains(CAST(metadata->'tags' AS VARCHAR[]), 'ensemble')",
+    "WHERE list_contains(CAST(metadata->'tags' AS VARCHAR[]), 'ensemble')"
 )
 # [('ecmwf-ifs-ens',), ('gefs-forecast-35d',), ('noaa-gefs-analysis',)]
-
-# arrow3 Table (zero-copy from DuckDB, no pyarrow required)
-tbl = sql_arrow(catalog, "SELECT * FROM entries")
 ```
 
-DuckDB table schema: `(name VARCHAR, snapshot_id VARCHAR, metadata JSON)`.
-Use `metadata->>'field'` for scalar extraction, `CAST(metadata->'field' AS VARCHAR[])` for array fields.
+Standalone `basal.search` functions give return-type control: `sql()` (tuples),
+`sql_df()` (pandas), `sql_arrow()` (zero-copy arrow, no pyarrow). Table schema:
+`(name VARCHAR, snapshot_id VARCHAR, metadata JSON)` — `metadata->>'field'` for scalars,
+`CAST(metadata->'field' AS VARCHAR[])` for arrays.
 
-> **Alternative backend ideas:** [Apache DataFusion](https://datafusion.apache.org/) 
+> **Alternative backend ideas:** [Apache DataFusion](https://datafusion.apache.org/),
 > [zarr-datafusion-search-examples](https://github.com/developmentseed/zarr-datafusion-search-examples).
 
 #### Similarity search
 
-When you know what you're looking for but can't express it as a structured query, use `catalog.search()` to find entries by plain-text description — or use a dataset you already know as the starting point.
+Find entries by plain-text description, or by resemblance to a known entry:
 
 ```python
-# Default: fastembed TextEmbedding runs locally, no API key
-results = catalog.search("high resolution precipitation radar CONUS", top_k=3)
-# [(Entry(name='noaa-mrms-hourly', ...),   0.77),
-#  (Entry(name='noaa-hrrr-analysis', ...), 0.73),
-#  (Entry(name='noaa-hrrr-forecast', ...), 0.70)]
+# fastembed TextEmbedding runs locally, no API key
+catalog.search("high resolution precipitation radar CONUS", top_k=3)
+# [(Entry(name='noaa-mrms-hourly', ...), 0.77), (Entry(name='noaa-hrrr-analysis', ...), 0.73), ...]
 
-# Richer embeddings: lazily fetch full zarr schema from each store (all da.attrs,
-# coord attrs, global_attrs) instead of only the CF subset cached at registration.
-# Results cached in-memory by snapshot_id — fast after the first call.
-results = catalog.search("high resolution precipitation radar CONUS", use_schema=True, top_k=3)
-
-# Pre-filter with DuckDB SQL on the variable-level schema table before embedding —
-# reduces N before the expensive embedding step.
-results = catalog.search(
-    "precipitation flux",
-    use_schema=True,
-    pre_filter="variable_name = 'pr' AND list_contains(dims, 'lat')",
-    top_k=5,
-)
-
-# Or use the standalone functions with a custom embed_fn: list[str] -> list[list[float]]
-from basal.search import similar, similar_by_schema
-from fastembed import TextEmbedding
-model = TextEmbedding("BAAI/bge-small-en-v1.5")
-embed = lambda texts: list(model.embed(texts))
-
-results = similar(catalog, "sea surface temperature", embed_fn=embed, top_k=3)
-results = similar_by_schema(catalog, "sea surface temperature", embed_fn=embed, top_k=3)
+# Neighbors of a known entry (same variables / domain / coverage)
+catalog.similar_to("ecmwf-aifs-single", n=4)        # or: entry.similar(catalog, n=4)
+# [(Entry('ecmwf-ifs-ens'), 0.87), (Entry('noaa-gfs-forecast'), 0.80), ...]
 ```
 
-Both use DuckDB `array_cosine_similarity` — no external vector DB. `similar()` is fast but uses only cached CF attrs. `similar_by_schema()` fetches full zarr attrs from each store in parallel and produces richer embeddings; subsequent calls use the in-memory cache and are equally fast.
+All use DuckDB `array_cosine_similarity` — no external vector DB. By default embeddings
+use the CF attrs cached at registration. Pass `use_schema=True` to lazily fetch each
+store's full zarr schema for richer embeddings (cached in-memory by snapshot_id), and
+`pre_filter=` (DuckDB SQL over the variable-level schema table) to shrink N before
+embedding. Standalone `basal.search.similar` / `similar_by_schema` accept a custom
+`embed_fn: list[str] -> list[list[float]]`.
 
-`pre_filter` columns (schema table): `dataset_name VARCHAR`, `variable_name VARCHAR`, `dtype VARCHAR`, `dims list<utf8>`, `shape list<int64>`, `chunks list<int64>`, `attrs JSON`, `global_attrs JSON`.
-
-Find what else in the catalog resembles a known entry — same variables, similar domain, related coverage:
-
-```python
-# Via catalog
-results = catalog.similar_to("ecmwf-aifs-single", n=4)
-for entry, score in results:
-    print(f"{entry.name}: {score:.2f}")
-# ecmwf-ifs-ens: 0.87
-# noaa-gfs-forecast: 0.80
-# era5-weatherbench2: 0.79
-# noaa-gefs-analysis: 0.78
-
-# Via entry (shorthand)
-entry = catalog.get("noaa-hrrr-forecast")
-for neighbor, score in entry.similar(catalog, n=3):
-    print(f"{neighbor.name}: {score:.2f}")
-# noaa-hrrr-analysis: 0.92
-# noaa-mrms-hourly: 0.83
-# noaa-gfs-analysis: 0.79
-```
+`pre_filter` schema columns: `dataset_name`, `variable_name`, `dtype` (VARCHAR);
+`dims`, `shape`, `chunks` (lists); `attrs`, `global_attrs` (JSON).
 
 
 ### Catalog summary
@@ -671,24 +645,9 @@ with open("catalog.json", "w") as f:
     json.dump(stac, f, indent=2)
 ```
 
-To register with spatial metadata explicitly:
-
-```python
-catalog.register(
-    "my-dataset",
-    storage=storage,
-    bbox=[-180.0, -90.0, 180.0, 90.0],   # geometry auto-derived from bbox
-    start_datetime="2015-01-01",
-    end_datetime=None,                     # ongoing
-)
-```
-
-To add spatial metadata to an existing entry:
-
-```python
-catalog.update("my-dataset", bbox=[-10.0, 30.0, 40.0, 70.0])
-# geometry is auto-derived and stored alongside bbox
-```
+Set `bbox` (and optionally `start_datetime`/`end_datetime`) at `register()` or via
+`catalog.update(name, bbox=...)` — see [Filter by time and space](#filter-by-time-and-space).
+`geometry` is auto-derived from `bbox`.
 
 ### STAC API server
 
@@ -724,23 +683,10 @@ Endpoints: `GET /`, `GET /conformance`, `GET /collections`, `GET /collections/{i
 
 Entries without `bbox` are served with `null` geometry — valid per STAC spec.
 
-#### STAC browser clients
-
-Any STAC-aware client can discover and browse the catalog once the server is running:
-
-- **[STAC Browser](https://radiantearth.github.io/stac-browser/)** (web) — paste your server URL into the browser, navigate entries, inspect metadata
-- **QGIS** — Plugins → STAC API Browser → add connection → enter server URL
-- **[pystac-client](https://pystac-client.readthedocs.io)** — Python client for programmatic STAC API queries:
-
-  ```python
-  from pystac_client import Client
-  client = Client.open("http://localhost:8000")
-  results = client.search(bbox=[-10, 30, 40, 70], datetime="2020-01-01/2021-01-01")
-  for item in results.items():
-      print(item.id, item.assets)
-  ```
-
-- **EOxHub / Pangeo-Forge intake** — point at the server URL in catalog config
+Once running, any STAC-aware client can browse the catalog by pointing at the server URL:
+[STAC Browser](https://radiantearth.github.io/stac-browser/) (web), QGIS (STAC API
+Browser plugin), [pystac-client](https://pystac-client.readthedocs.io) (Python),
+EOxHub / Pangeo-Forge intake.
 
 
 ## Metadata schema
@@ -772,8 +718,13 @@ These fields are optional but recommended for interoperability with STAC tooling
 | `license` | SPDX identifier e.g. `CC-BY-4.0` | `properties.license` |
 | `tags` | List of keyword strings | `properties.keywords` |
 | `doi` | Dataset DOI | `sci:doi` ([scientific extension](https://github.com/stac-extensions/scientific)) |
+| `layer_hints` | Per-variable rendering hints `{var: {colormap, clim, ...}}` | — |
+| `global_colormap` | Default colormap string for all variables (overridden per-var by `layer_hints`) | — |
 
 `geometry` (GeoJSON Polygon) is **auto-derived** from `bbox` — no need to set it manually.
+
+`var_names`, `coord_names`, and `dim_names` (flat name lists) are **auto-derived** from the store at
+registration time — no need to set them manually.
 
 Use `catalog.summary()` to see which recommended fields are missing across your catalog.
 
@@ -785,12 +736,39 @@ Use `catalog.summary()` to see which recommended fields are missing across your 
 - **Storage reads are explicit and bounded.** `register()` reads the dataset store once at registration time to extract CF attrs and snapshot anchor. `update_from_store()` and `entry.inspect()` are explicit re-inspection opt-ins; all other catalog operations are metadata-only.
 - **`derived_from` enables lineage without requiring it.** Pass a list of upstream entry IDs to track provenance.
 - **No server, no database.** The catalog is just an Icechunk repo in object storage. Gives you a non-local catalog that doesn't require running a bunch of infrastructure.
-- **One branch per entry, not one Zarr group per entry.** Branches give independent commit histories per entry and concurrent `register()` calls on different entries never conflict — Icechunk transactions are branch-scoped. `inspect_repo_info()` reads all branch HEADs in a single call, so catalog listing is O(1) regardless of entry count. Zarr groups on a shared branch would serialize concurrent writes and require traversing the store hierarchy to list entries.
+- **One branch per entry, not one Zarr group per entry.** Branches give independent commit histories per entry and concurrent `register()` calls on different entries never conflict — Icechunk transactions are branch-scoped. `inspect_repo_info()` fetches all branches + snapshot metadata in a single call, so listing is one round trip regardless of entry count. Zarr groups on a shared branch would serialize concurrent writes and require traversing the store hierarchy to list entries.
+
+## Scaling
+
+`list()` uses a single `inspect_repo_info()` call, but that call returns **every snapshot
+in the repo**, not just branch HEADs — so its cost grows with total commit history
+(entries × updates), not entry count alone. Benchmark (`scripts/benchmark_catalog.py`,
+local FS):
+
+| N entries | updates/entry | total snapshots | `list()` | after `expire()` | snapshots after |
+|---|---|---|---|---|---|
+| 100 | 0  | 102  | 1.1 ms  | 1.1 ms | 102 |
+| 100 | 10 | 1102 | 9.2 ms  | 2.6 ms | 102 |
+| 500 | 0  | 502  | 5.5 ms  | 5.5 ms | 502 |
+| 500 | 10 | 5502 | 40.2 ms | 5.6 ms | 502 |
+
+Operational entries that append in time accumulate snapshots and slow listing. Bound it
+with `catalog.expire(older_than)` — it collapses old history out of the metadata graph
+while keeping every entry's current HEAD, restoring `list()` to scale with entry count:
+
+```python
+import datetime
+catalog.expire(datetime.datetime.now(datetime.UTC))            # keep only current HEADs
+catalog.expire(cutoff, garbage_collect=True)                   # also reclaim object storage
+```
+
+Branches (entries) are never deleted by `expire()`.
 
 ## Open questions
 
-- How will this scale? 
-    - No idea, this would be great to figure out the limits. Maybe this is where you could federate catalogs. 
+- How far does the branch-per-entry model scale (thousands+ of entries)? `expire()`
+  bounds the snapshot count, but branch count and per-entry commit-metadata size are
+  still untested at large N. Federating catalogs may be the answer above some limit.
 
 
 ## To Do:

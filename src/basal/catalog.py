@@ -5,7 +5,7 @@ import warnings
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import icechunk
 
@@ -13,12 +13,18 @@ from .entry import Entry
 from .history import EVENT_KEY, collect_history
 from .schema import validate
 
+if TYPE_CHECKING:
+    from .storage import StorageSpec
+
 warnings.filterwarnings(
     "ignore",
     message=".*Numcodecs codecs are not in the Zarr version 3 specification.*",
 )
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
+
+DELETED_KEY = "__deleted__"
+"""Reserved tombstone marker in entry HEAD metadata (soft-delete)."""
 
 
 def _parse_iso_dt(s: str) -> datetime:
@@ -119,19 +125,20 @@ class IcechunkCatalog:
     def register(
         self,
         name: str,
-        storage: icechunk.Storage,
+        storage: icechunk.Storage | StorageSpec,
         format: str = "icechunk",
         branch: str = "main",
         config: icechunk.RepositoryConfig | None = None,
         storage_config: dict | None = None,
         derive_extent: bool = False,
+        inspect: bool = True,
         **metadata: Any,
     ) -> None:
         """Register a dataset.
 
-        Opens the store via ``storage`` (icechunk validates it exists), then
-        auto-extracts CF attrs, dataset_snapshot_id, virtual_chunk_containers,
-        location, and storage_config. Explicit kwargs win over derived attrs.
+        By default opens the store to auto-extract CF attrs, var_names,
+        dataset_snapshot_id, and virtual_chunk_containers. Explicit kwargs
+        always win over derived attrs.
 
         Parameters
         ----------
@@ -150,26 +157,59 @@ class IcechunkCatalog:
         derive_extent:
             If True, read coordinate arrays to auto-populate ``bbox``,
             ``start_datetime``, and ``end_datetime``. Reads 1-D coord arrays
-            only — no chunk data. Explicit kwargs still win.
+            only — no chunk data. Explicit kwargs still win. Ignored when
+            ``inspect=False``.
+        inspect:
+            If False, skip store IO entirely — no CF attrs, var_names, or
+            snapshot_id are auto-derived. Caller must supply all desired
+            metadata as kwargs. Use for large stores or offline registration.
         **metadata:
             Arbitrary metadata fields. Common optional fields: owner, title,
             license, tags. Pass location= to override the auto-derived URL.
         """
         from .storage import (
+            StorageSpec,
             _virtual_chunk_container_to_config,
+            location_from_config,
             storage_to_config,
             storage_to_location,
         )
 
         _validate_name(name)
 
-        derived = _derive_metadata_from_store(
-            storage, branch=branch, config=config, derive_extent=derive_extent
+        if isinstance(storage, StorageSpec):
+            ic_storage = storage.build()
+            spec_config = storage.to_config()
+            spec_location = location_from_config(spec_config)
+        else:
+            ic_storage = storage
+            spec_config = None
+            spec_location = None
+            if storage_config is None:
+                warnings.warn(
+                    "register() given a raw icechunk.Storage; storage_config is being "
+                    "recovered by parsing str(storage), which depends on an undocumented "
+                    "icechunk repr and may break on upgrade. Prefer "
+                    "basal.storage.s3_storage(...) (StorageSpec) or pass storage_config= "
+                    "explicitly for a stable, version-independent config.",
+                    stacklevel=2,
+                )
+
+        derived = (
+            _derive_metadata_from_store(
+                ic_storage, branch=branch, config=config, derive_extent=derive_extent
+            )
+            if inspect
+            else {}
         )
 
-        derived_storage_config = storage_config or storage_to_config(storage)
-        derived_location = metadata.pop("location", None) or storage_to_location(
-            storage
+        derived_storage_config = (
+            storage_config or spec_config or storage_to_config(ic_storage)
+        )
+        derived_location = (
+            metadata.pop("location", None)
+            or spec_location
+            or storage_to_location(ic_storage)
         )
 
         # Serialize VirtualChunkContainer details from config when provided.
@@ -194,20 +234,7 @@ class IcechunkCatalog:
                 virtual_chunk_containers_config
             )
         validate(entry_meta)
-
-        if name in self._repo.list_branches():
-            raise ValueError(
-                f"Dataset '{name}' already registered. Use deregister first."
-            )
-
-        main_snap = self._repo.lookup_branch("main")
-        self._repo.create_branch(name, main_snap)
-        session = self._repo.writable_session(name)
-        session.commit(
-            f"register {name}",
-            metadata={**entry_meta, EVENT_KEY: "registered"},
-            allow_empty=True,
-        )
+        self._commit_entry(name, entry_meta)
 
     def register_zarr(
         self,
@@ -215,6 +242,7 @@ class IcechunkCatalog:
         location: str,
         store_config: dict | None = None,
         derive_extent: bool = False,
+        inspect: bool = True,
         **metadata: Any,
     ) -> None:
         """Register a plain Zarr store (not Icechunk).
@@ -238,7 +266,12 @@ class IcechunkCatalog:
             public/anonymous access. See obstore docs for provider-specific keys.
         derive_extent:
             If True, read coordinate arrays to auto-populate ``bbox``,
-            ``start_datetime``, and ``end_datetime``.
+            ``start_datetime``, and ``end_datetime``. Ignored when
+            ``inspect=False``.
+        inspect:
+            If False, skip store IO entirely — no CF attrs or var_names are
+            auto-derived. Caller must supply all desired metadata as kwargs.
+            Use for large stores or offline registration.
         **metadata:
             Arbitrary metadata fields (owner, title, license, tags, …).
         """
@@ -246,10 +279,13 @@ class IcechunkCatalog:
 
         _validate_name(name)
 
-        info = inspect_zarr_store(
-            location, store_config=store_config, derive_extent=derive_extent
-        )
-        derived = stable_attrs(info)
+        if inspect:
+            info = inspect_zarr_store(
+                location, store_config=store_config, derive_extent=derive_extent
+            )
+            derived = stable_attrs(info)
+        else:
+            derived = {}
 
         entry_meta: dict[str, Any] = {
             "location": location,
@@ -260,14 +296,22 @@ class IcechunkCatalog:
         if store_config:
             entry_meta["store_config"] = store_config
         validate(entry_meta)
+        self._commit_entry(name, entry_meta)
 
-        if name in self._repo.list_branches():
+    def _commit_entry(self, name: str, entry_meta: dict[str, Any]) -> None:
+        """Create the entry branch (or reuse a tombstoned one) and commit metadata.
+
+        Raises if the branch exists and is not soft-deleted. A tombstoned branch is
+        reused, so re-registering a deregistered name succeeds and clears the tombstone.
+        """
+        existing = name in self._repo.list_branches()
+        if existing and not self._head_metadata(name).get(DELETED_KEY):
             raise ValueError(
                 f"Dataset '{name}' already registered. Use deregister first."
             )
-
-        main_snap = self._repo.lookup_branch("main")
-        self._repo.create_branch(name, main_snap)
+        if not existing:
+            main_snap = self._repo.lookup_branch("main")
+            self._repo.create_branch(name, main_snap)
         session = self._repo.writable_session(name)
         session.commit(
             f"register {name}",
@@ -278,12 +322,13 @@ class IcechunkCatalog:
     def register_or_update(
         self,
         name: str,
-        storage: icechunk.Storage,
+        storage: icechunk.Storage | StorageSpec,
         format: str = "icechunk",
         branch: str = "main",
         config: icechunk.RepositoryConfig | None = None,
         storage_config: dict | None = None,
         derive_extent: bool = False,
+        inspect: bool = True,
         **metadata: Any,
     ) -> str:
         """Register a dataset, or update its metadata if already registered.
@@ -300,6 +345,7 @@ class IcechunkCatalog:
                 config=config,
                 storage_config=storage_config,
                 derive_extent=derive_extent,
+                inspect=inspect,
                 **metadata,
             )
             return "registered"
@@ -411,18 +457,59 @@ class IcechunkCatalog:
             diff["end_datetime"] = (old_end, new_end)
         return diff
 
-    def deregister(self, name: str) -> None:
-        self._repo.delete_branch(name)
+    def deregister(self, name: str, purge: bool = False) -> None:
+        """Deregister an entry.
+
+        Soft-delete by default: commits a tombstone, retaining the branch and its
+        full commit history so the entry can be restored or re-registered. The
+        entry is excluded from ``list()`` and ``get()`` (unless ``include_deleted``).
+
+        Pass ``purge=True`` to hard-delete the branch — irreversible, history lost.
+        """
+        if purge:
+            self._repo.delete_branch(name)
+            return
+        entry = self.get(name, include_deleted=True)
+        merged = {**entry.metadata, DELETED_KEY: True}
+        session = self._repo.writable_session(name)
+        session.commit(
+            f"deregister {name}",
+            metadata={**merged, EVENT_KEY: "deregistered"},
+            allow_empty=True,
+        )
+
+    def restore(self, name: str) -> None:
+        """Clear the tombstone on a soft-deleted entry, returning it to the catalog."""
+        entry = self.get(name, include_deleted=True)
+        if not self._head_metadata(name).get(DELETED_KEY):
+            return
+        session = self._repo.writable_session(name)
+        session.commit(
+            f"restore {name}",
+            metadata={**entry.metadata, EVENT_KEY: "updated"},
+            allow_empty=True,
+        )
 
     # --- reads ---
 
-    def get(self, name: str) -> Entry:
+    def _head_metadata(self, name: str) -> dict:
+        """Raw HEAD commit metadata for an entry branch (internal keys retained)."""
+        snapshot_id = self._repo.lookup_branch(name)
+        return self._repo.lookup_snapshot(snapshot_id).metadata or {}
+
+    def get(self, name: str, include_deleted: bool = False) -> Entry:
         snapshot_id = self._repo.lookup_branch(name)
         info = self._repo.lookup_snapshot(snapshot_id)
+        meta = info.metadata or {}
+        if meta.get(DELETED_KEY) and not include_deleted:
+            raise KeyError(
+                f"Entry {name!r} was deregistered. Pass include_deleted=True to read it, "
+                "restore() it, or re-register the name."
+            )
         return Entry(
             name=name,
             snapshot_id=snapshot_id,
-            metadata=_strip_internal(info.metadata or {}),
+            metadata=_strip_internal(meta),
             written_at=info.written_at,
         )
 
@@ -438,6 +525,8 @@ class IcechunkCatalog:
             snap = snaps_by_id.get(snap_id, {})
             meta = snap.get("metadata", {})
             if not meta.get("location"):
+                continue
+            if meta.get(DELETED_KEY):
                 continue
             entries.append(
                 Entry(
@@ -694,6 +783,29 @@ class IcechunkCatalog:
                 "Pass storage= explicitly: catalog.update_from_store(name, storage=...)",
                 stacklevel=2,
             )
+
+    def expire(
+        self,
+        older_than: datetime,
+        *,
+        garbage_collect: bool = False,
+    ) -> set[str]:
+        """Expire entry-history snapshots older than ``older_than``, keeping branch HEADs.
+
+        Each ``update``/``extend`` adds a snapshot. ``list()`` reads all snapshots via
+        ``inspect_repo_info``, so unbounded history slows listing. Expiring collapses old
+        snapshots out of the metadata graph while preserving every entry's current HEAD.
+
+        Branches (catalog entries) are never deleted — ``delete_expired_branches`` is
+        intentionally not exposed. Pass ``garbage_collect=True`` to also reclaim the
+        underlying object storage for expired snapshots.
+
+        Returns the set of expired snapshot ids.
+        """
+        expired = self._repo.expire_snapshots(older_than=older_than)
+        if garbage_collect:
+            self._repo.garbage_collect(older_than)
+        return expired
 
     # --- export ---
 

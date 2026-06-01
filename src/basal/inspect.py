@@ -206,37 +206,34 @@ def inspect_zarr_store(
 def stable_attrs(info: dict[str, Any]) -> dict[str, Any]:
     """Extract the subset of inspect_store output safe to store eagerly in the catalog.
 
-    Excludes dims/shape (mutable on append). Includes CF global attrs and
-    per-variable stable attrs (units, long_name, standard_name, cell_methods).
+    Stores title/institution from CF global attrs, per-variable semantic attrs
+    (units, long_name, standard_name) for similarity search, flat name lists
+    (var_names, coord_names, dim_names) for SQL filtering, and spatial/temporal
+    extent if present. Excludes dtype, shape, dims — mutable on append.
     """
     out: dict[str, Any] = {}
 
-    cf_keys = {
-        "title",
-        "institution",
-        "source",
-        "references",
-        "history",
-        "comment",
-        "conventions",
-    }
-    for k in cf_keys:
+    for k in ("title", "institution", "conventions"):
         if k in info.get("global_attrs", {}):
             out[k] = info["global_attrs"][k]
 
     var_summary = {}
     for name, meta in info.get("variables", {}).items():
-        var_summary[name] = {
-            "dtype": meta["dtype"],
-            "dims": meta["dims"],
-            "attrs": {
-                k: v
-                for k, v in meta.get("attrs", {}).items()
-                if k in {"units", "long_name", "standard_name", "cell_methods"}
-            },
+        var_attrs = {
+            k: v
+            for k, v in meta.get("attrs", {}).items()
+            if k in {"units", "long_name", "standard_name"}
         }
+        var_summary[name] = {"attrs": var_attrs}
     if var_summary:
         out["variables"] = var_summary
+        out["var_names"] = list(var_summary.keys())
+
+    if "coords" in info:
+        out["coord_names"] = list(info["coords"].keys())
+
+    if "dims" in info:
+        out["dim_names"] = list(info["dims"].keys())
 
     for key in ("bbox", "start_datetime", "end_datetime"):
         if key in info:

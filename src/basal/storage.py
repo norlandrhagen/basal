@@ -1,18 +1,111 @@
-"""Icechunk storage construction and configuration utilities."""
+"""Icechunk storage construction and configuration utilities.
+
+Two ways to record a dataset's storage config in the catalog:
+
+- ``StorageSpec`` (preferred) — captures the exact kwargs passed to the icechunk
+  constructor, so ``to_config()`` is exact and version-independent. Build specs with
+  the ``basal.storage`` constructors (``s3_storage``, ``gcs_storage``, ...).
+- raw ``icechunk.Storage`` — config is recovered heuristically by parsing
+  ``str(storage)`` (``_parse_storage_repr``). icechunk exposes no serialization API, so
+  this depends on an undocumented repr format and can break on an icechunk upgrade.
+  ``register()`` warns when it falls back to this path.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
 import icechunk
 
+# Serializable config keys understood by storage_from_config(), per storage type.
+# StorageSpec.to_config() emits only these (drops credential objects / unknown kwargs).
+_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "s3": ("bucket", "prefix", "region", "anonymous", "from_env", "endpoint_url"),
+    "gcs": ("bucket", "prefix", "anonymous", "from_env"),
+    "local": ("path",),
+    "http": ("base_url",),
+    "redirect": ("base_url",),
+    "in_memory": (),
+}
+
+
+@dataclass
+class StorageSpec:
+    """Captured icechunk.Storage construction: exact kwargs + type tag.
+
+    ``build()`` reconstructs the live ``icechunk.Storage`` with full fidelity
+    (credentials included). ``to_config()`` emits a JSON-serializable subset for
+    catalog metadata — no repr parsing, stable across icechunk versions.
+
+    Build via the ``basal.storage`` constructors (``s3_storage`` etc.), not directly.
+    """
+
+    type: str
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def build(self) -> icechunk.Storage:
+        t = self.type
+        if t == "s3":
+            return icechunk.s3_storage(**self.kwargs)
+        if t == "gcs":
+            return icechunk.gcs_storage(**self.kwargs)
+        if t == "local":
+            return icechunk.local_filesystem_storage(self.kwargs["path"])
+        if t == "http":
+            return icechunk.http_storage(**self.kwargs)
+        if t == "redirect":
+            return icechunk.redirect_storage(**self.kwargs)
+        if t == "in_memory":
+            return icechunk.in_memory_storage()
+        raise ValueError(f"Unknown storage type {t!r}.")
+
+    def to_config(self) -> dict[str, Any]:
+        """Serializable config dict consumed by storage_from_config()."""
+        config: dict[str, Any] = {"type": self.type}
+        for key in _CONFIG_KEYS.get(self.type, ()):
+            val = self.kwargs.get(key)
+            if val is not None and isinstance(val, str | bool | int | float):
+                config[key] = val
+        return config
+
+
+def s3_storage(**kwargs: Any) -> StorageSpec:
+    """Capture an S3 storage spec. Same kwargs as ``icechunk.s3_storage``."""
+    return StorageSpec("s3", kwargs)
+
+
+def gcs_storage(**kwargs: Any) -> StorageSpec:
+    """Capture a GCS storage spec. Same kwargs as ``icechunk.gcs_storage``."""
+    return StorageSpec("gcs", kwargs)
+
+
+def local_filesystem_storage(path: str) -> StorageSpec:
+    """Capture a local-filesystem storage spec."""
+    return StorageSpec("local", {"path": str(path)})
+
+
+def http_storage(base_url: str, **kwargs: Any) -> StorageSpec:
+    """Capture an HTTP storage spec."""
+    return StorageSpec("http", {"base_url": base_url, **kwargs})
+
+
+def redirect_storage(base_url: str) -> StorageSpec:
+    """Capture a redirect storage spec."""
+    return StorageSpec("redirect", {"base_url": base_url})
+
+
+def in_memory_storage() -> StorageSpec:
+    """Capture an in-memory storage spec."""
+    return StorageSpec("in_memory", {})
+
 
 def _parse_storage_repr(storage: icechunk.Storage) -> dict[str, str]:
     """Parse icechunk.Storage __str__ into a key-value dict.
 
-    The repr format is stable: one "key: value" per line after the header line.
-    Used by storage_to_config() to extract bucket, prefix, region, etc.
+    Heuristic: depends on an undocumented repr format. Used only as the fallback
+    when register() is given a raw icechunk.Storage instead of a StorageSpec.
     """
     lines = str(storage).strip().splitlines()
     data: dict[str, str] = {}
@@ -73,7 +166,11 @@ def storage_to_config(storage: icechunk.Storage) -> dict[str, Any]:
 
 def storage_to_location(storage: icechunk.Storage) -> str:
     """Derive a canonical location URL string from an icechunk.Storage object."""
-    config = storage_to_config(storage)
+    return location_from_config(storage_to_config(storage))
+
+
+def location_from_config(config: dict) -> str:
+    """Derive a canonical location URL string from a storage config dict."""
     stype = config.get("type")
 
     if stype == "s3":
