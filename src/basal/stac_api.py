@@ -210,6 +210,25 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
     def _not_found_collection(cid: str):
         raise HTTPException(status_code=404, detail=f"Collection '{cid}' not found")
 
+    def _get_item(item_id: str) -> dict:
+        try:
+            entry = catalog.get(item_id)
+        except Exception as err:
+            raise HTTPException(
+                status_code=404, detail=f"Item '{item_id}' not found"
+            ) from err
+        return _entry_to_stac_item(entry, collection_id)
+
+    def _search_response(features: list[dict]) -> dict:
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "numberReturned": len(features),
+            "links": [
+                {"rel": "self", "href": "/search", "type": "application/geo+json"}
+            ],
+        }
+
     # --- endpoints ---
 
     @app.get("/")
@@ -309,24 +328,12 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
     def item(cid: str, item_id: str):
         if cid != collection_id:
             _not_found_collection(cid)
-        try:
-            entry = catalog.get(item_id)
-        except Exception as err:
-            raise HTTPException(
-                status_code=404, detail=f"Item '{item_id}' not found"
-            ) from err
-        return _entry_to_stac_item(entry, collection_id)
+        return _get_item(item_id)
 
     @app.get("/items/{item_id}")
     def item_root(item_id: str):
         """Root-level item endpoint — STAC browsers navigate here from item links."""
-        try:
-            entry = catalog.get(item_id)
-        except Exception as err:
-            raise HTTPException(
-                status_code=404, detail=f"Item '{item_id}' not found"
-            ) from err
-        return _entry_to_stac_item(entry, collection_id)
+        return _get_item(item_id)
 
     def _apply_search_filters(
         bbox: list[float] | None,
@@ -375,15 +382,9 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
     ):
         parsed_bbox = [float(x) for x in bbox.split(",")] if bbox else None
         parsed_ids = ids.split(",") if ids else None
-        features = _apply_search_filters(parsed_bbox, datetime, parsed_ids, limit)
-        return {
-            "type": "FeatureCollection",
-            "features": features,
-            "numberReturned": len(features),
-            "links": [
-                {"rel": "self", "href": "/search", "type": "application/geo+json"}
-            ],
-        }
+        return _search_response(
+            _apply_search_filters(parsed_bbox, datetime, parsed_ids, limit)
+        )
 
     @app.post("/search")
     def search_post(body: dict):
@@ -391,15 +392,9 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
         datetime_str = body.get("datetime")
         ids = body.get("ids")
         limit = int(body.get("limit", 10))
-        features = _apply_search_filters(parsed_bbox, datetime_str, ids, limit)
-        return {
-            "type": "FeatureCollection",
-            "features": features,
-            "numberReturned": len(features),
-            "links": [
-                {"rel": "self", "href": "/search", "type": "application/geo+json"}
-            ],
-        }
+        return _search_response(
+            _apply_search_filters(parsed_bbox, datetime_str, ids, limit)
+        )
 
     return app
 

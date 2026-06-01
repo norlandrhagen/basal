@@ -1,6 +1,6 @@
 # basal: an icechunk native catalog
 
-A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) with no external databases. 
+A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) with no external database. 
 
 
 `*basal` as in, the bottom layer of an icesheet, not the herb.
@@ -12,7 +12,7 @@ A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) w
 
 Earth science catalogs seem to fall into two categories: a managed centralized database or local some collection of local files (STAC json or intake.yaml/json). The idea here is to get a bit of the shared catalog and tracking from a managed database, but without the overhead of running that. Icechunk provides really nice git-like transaction history and gives you things like optimistic concurrency in cloud storage. 
 
-You start by creating a *_catalog_* Icechunk storage that acts as a centralized dataset catalog. Each dataset is registered as a branch whose HEAD snapshot carries that entry's metadata. `inspect_repo_info()` is a single read that returns all entries in your catalog — no external database, no coordinator.
+You start by creating a basal *_catalog_*, which is an Icechunk store that acts like a centralized dataset catalog. Each dataset is registered as a branch whose HEAD snapshot carries that entry's metadata. `inspect_repo_info()` is a single read that returns all entries in your catalog.
 
 ```
 s3://carbonplan-share/basal/public_icechunk_stores/  ← (the catalog)
@@ -24,11 +24,11 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/ ← Icechunk dataset 
 
 ## Public catalog entries
 
-15 public datasets at `s3://carbonplan-share/basal/public_icechunk_stores` — 14 Icechunk, 1 plain Zarr:
+15 public datasets at `s3://carbonplan-share/basal/public_icechunk_stores` — 13 standard Icechunk, one virtual Icechunk and a vanilla Zarr:
 
 | Entry | Owner | Format | Notes |
 |---|---|---|---|
-| `arco-era5-full` | google-research | zarr | Full 37-level hourly ERA5, 1940–present (GCS, obstore backend). |
+| `arco-era5-full` | google-research | zarr | Full 37-level hourly ERA5, 1940–present |
 | `carbonplan-nohrsc-snowfall` | carbonplan | icechunk | Virtual Zarr store |
 | `carbonplan-ocr-fire-risk` | carbonplan | icechunk | |
 | `dwd-icon-eu` | dynamical.org | icechunk | |
@@ -49,8 +49,8 @@ Locations are stored in catalog metadata — use `catalog.get(name).location` to
 ## Usage
 
 All examples use the public catalog at `s3://carbonplan-share/basal/public_icechunk_stores`,
-with 14 public Icechunk datasets from [dynamical.org](https://dynamical.org) and others.
-No credentials required — the catalog is publicly readable.
+with public Icechunk datasets from [dynamical.org](https://dynamical.org) and others.
+No credentials required — the catalog should be publicly readable.
 
 ### Open an existing catalog
 
@@ -159,16 +159,17 @@ catalog.register(
 ```
 
 `register()` accepts a `basal.storage` `StorageSpec` (`s3_storage`, `gcs_storage`,
-`local_filesystem_storage`, ...) or a raw `icechunk.Storage`. `location` and
-`storage_config` are auto-derived and stored in catalog metadata so consumers can call
-`entry.to_xarray()` with no storage arguments.
+`local_filesystem_storage`, ...). `location` and `storage_config` are derived from the
+spec and stored in catalog metadata so consumers can call `entry.to_xarray()` with no
+storage arguments.
 
-> **Prefer `StorageSpec`.** icechunk exposes no serialization API, so when a raw
-> `icechunk.Storage` is passed, `storage_config` is recovered by parsing `str(storage)`
-> — an undocumented format that can break on an icechunk upgrade. `register()` emits a
-> `UserWarning` in that case. `basal.storage.*` captures the exact kwargs instead and is
-> version-independent. (You can also pass `storage_config=` explicitly to silence the
-> warning.)
+> **Why a `StorageSpec`?** icechunk exposes no serialization API — a live
+> `icechunk.Storage` cannot be turned back into a config dict. A `StorageSpec` captures
+> the exact constructor kwargs, so `storage_config` is recorded losslessly and stays
+> valid across icechunk upgrades. A raw `icechunk.Storage` is still accepted, but it
+> carries no serializable config: pass `storage_config=` (and `location=`) alongside it,
+> or the entry is registered without a `storage_config` and `to_xarray()` will need an
+> explicit `storage=`.
 
 
 ### Register and deregister
@@ -183,20 +184,27 @@ catalog.register(
     variables=["temperature"],
 )
 
-# Soft-delete by default: the entry is hidden from list()/get() but its branch and
-# full commit history are retained, so it can be restored or the name re-registered.
+# Deregister: commits a `deregistered` marker on the entry's branch. The branch and
+# its full commit history stay, so the entry can be restored or the name re-registered.
 catalog.deregister("my-dataset")
-catalog.restore("my-dataset")          # undo a soft-delete
-catalog.get("my-dataset", include_deleted=True)   # read a tombstoned entry
+catalog.restore("my-dataset")          # undo: commits the entry back into the catalog
+catalog.get("my-dataset", include_deleted=True)   # read a deregistered entry
 
-# Hard-delete: removes the branch and its history. Irreversible.
+# Purge: deletes the branch and its history outright. Irreversible.
 catalog.deregister("my-dataset", purge=True)
 ```
 
-`deregister()` is a soft-delete: it commits a tombstone (a `deregistered` event in
-`history()`) rather than dropping the branch, so the version history survives. `list()`
-and `get()` skip tombstoned entries; re-registering the same name reuses the branch and
-clears the tombstone. Pass `purge=True` for an irreversible hard delete.
+Each entry is an icechunk **branch**; every `register`/`update`/`deregister` is a
+**commit** on it (see [history](#history)). `deregister()` defaults to a reversible
+delete: it commits a `deregistered` marker at the branch HEAD instead of dropping the
+branch, so the commit history — and the provenance it carries — survives. `list()` and
+`get()` skip deregistered entries; `restore()` commits the entry back, and re-registering
+the name reuses the branch from where it left off.
+
+**When to use which:** default (reversible) for the normal case — a renamed, superseded,
+or accidentally-removed dataset whose history you may want back. `purge=True` only when
+the branch must truly be gone: legal/compliance erasure, or throwaway test entries.
+Purge is the equivalent of `git branch -D` — there is no undo.
 
 `register()` auto-extracts CF global attrs (`title`, `institution`), per-variable semantic attrs
 (`units`, `long_name`, `standard_name`), and records `dataset_snapshot_id` (the snapshot at
@@ -204,34 +212,6 @@ registration time). It also persists flat `var_names`, `coord_names`, and `dim_n
 sizes excluded since they grow on time-append). Explicit kwargs are prioritized over anything
 derived from the store. Pass `inspect=False` to skip store IO entirely and supply all metadata
 as kwargs.
-
-#### Layer hints (web viewer / map rendering)
-
-Pass `layer_hints` and `global_colormap` to annotate how variables should be rendered in a
-zarr-layer map viewer. Both fields are optional and stored verbatim in catalog metadata:
-
-```python
-catalog.register(
-    "noaa-gfs-analysis",
-    storage=storage,
-    global_colormap="viridis",           # default colormap for all variables
-    layer_hints={
-        "temperature_2m": {"colormap": "RdBu_r", "clim": [-40, 40]},
-        "wind_speed":      {"clim": [0, 30]},   # inherits global_colormap
-        "precipitation":   {"colormap": "Blues", "clim": [0, 50]},
-    },
-)
-```
-
-Resolution order for a zarr-layer consumer:
-
-```
-colormap:  layer_hints[var].colormap  ??  global_colormap  ??  viewer default
-clim:      layer_hints[var].clim      ??  null
-```
-
-`layer_hints` values are open dicts — any rendering key is valid (`colormap`, `clim`, `opacity`,
-`units_display`, etc.). `clim` must be `[min, max]` when present.
 
 ### Register a plain Zarr store
 
@@ -616,17 +596,17 @@ catalog.summary()
 
 ### Extending time coverage
 
-For operational datasets that append data in time (NWP, reanalyses), `extend()` is cheaper than `update_from_store()` — it reads only the time coordinate, skips bbox and CF attr re-inspection:
+For operational datasets that append data in time (NWP, reanalyses), pass `time_only=True`
+to `update_from_store()` — it reads only the time coordinate to refresh `end_datetime` and
+`dataset_snapshot_id`, skipping bbox and CF attr re-inspection:
 
 ```python
-diff = catalog.extend("noaa-hrrr-forecast")
+diff = catalog.update_from_store("noaa-hrrr-forecast", time_only=True)
 # {'dataset_snapshot_id': ('abc123', 'xyz789'), 'end_datetime': ('2026-04-01T00:00:00Z', '2026-04-28T00:00:00Z')}
-
-# The catalog history entry reads:
-# "extend noaa-hrrr-forecast: 2026-04-01T00:00:00Z -> 2026-04-28T00:00:00Z"
 ```
 
-Returns a dict of `{field: (old_value, new_value)}` for everything that changed — useful for logging or alerting.
+Returns a dict of `{field: (old_value, new_value)}` for everything that changed — useful
+for logging or alerting. (A full `update_from_store()` returns the same diff.)
 
 ### STAC export
 
@@ -718,8 +698,6 @@ These fields are optional but recommended for interoperability with STAC tooling
 | `license` | SPDX identifier e.g. `CC-BY-4.0` | `properties.license` |
 | `tags` | List of keyword strings | `properties.keywords` |
 | `doi` | Dataset DOI | `sci:doi` ([scientific extension](https://github.com/stac-extensions/scientific)) |
-| `layer_hints` | Per-variable rendering hints `{var: {colormap, clim, ...}}` | — |
-| `global_colormap` | Default colormap string for all variables (overridden per-var by `layer_hints`) | — |
 
 `geometry` (GeoJSON Polygon) is **auto-derived** from `bbox` — no need to set it manually.
 

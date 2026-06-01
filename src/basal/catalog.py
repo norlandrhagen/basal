@@ -24,7 +24,7 @@ warnings.filterwarnings(
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 
 DELETED_KEY = "__deleted__"
-"""Reserved tombstone marker in entry HEAD metadata (soft-delete)."""
+"""Marker committed at a branch HEAD to flag a deregistered (reversibly deleted) entry."""
 
 
 def _parse_iso_dt(s: str) -> datetime:
@@ -91,6 +91,32 @@ def _derive_metadata_from_store(
     return derived
 
 
+def _derive_time_extent(
+    storage: icechunk.Storage,
+    branch: str = "main",
+    config: icechunk.RepositoryConfig | None = None,
+) -> dict:
+    """Cheap refresh: read only the time coordinate for snapshot id + end_datetime.
+
+    Skips full CF/variable inspection — used by the time-append fast path.
+    """
+    import xarray as xr
+
+    from .inspect import _TIME_NAMES, _find_coord, _np_dt_to_iso
+
+    kwargs: dict = {"config": config} if config is not None else {}
+    repo = icechunk.Repository.open(storage, **kwargs)
+    derived: dict = {"dataset_snapshot_id": repo.lookup_branch(branch)}
+    session = repo.readonly_session(branch=branch)
+    ds = xr.open_zarr(session.store, consolidated=False)
+    time_da = _find_coord(ds, "time", _TIME_NAMES)
+    if time_da is not None and time_da.size > 0:
+        new_end = _np_dt_to_iso(time_da.values.max())
+        if new_end is not None:
+            derived["end_datetime"] = new_end
+    return derived
+
+
 class IcechunkCatalog:
     """Dataset catalog backed by a single Icechunk repository.
 
@@ -143,12 +169,16 @@ class IcechunkCatalog:
         Parameters
         ----------
         storage:
-            icechunk.Storage for the dataset store. Use icechunk.s3_storage(),
-            icechunk.local_filesystem_storage(), etc. to build.
+            A basal.storage StorageSpec (preferred) — s3_storage(), gcs_storage(),
+            local_filesystem_storage(), etc. The spec captures exact constructor
+            kwargs so the config is serialized losslessly and rebuilt later. A raw
+            icechunk.Storage is also accepted but only alongside storage_config=,
+            since icechunk.Storage itself cannot be serialized.
         storage_config:
-            Optional serializable dict overriding the auto-derived storage config.
-            Useful for private stores where from_env credentials must be recorded
-            explicitly to enable no-arg to_xarray() at read time.
+            Serializable storage config dict. Required when storage is a raw
+            icechunk.Storage; optional override when storage is a StorageSpec.
+            For private stores, record from_env credentials here so to_xarray()
+            works with no args at read time.
         config:
             Optional icechunk.RepositoryConfig. Required for stores with virtual
             chunks — basal serializes the VirtualChunkContainer settings so
@@ -171,29 +201,20 @@ class IcechunkCatalog:
             StorageSpec,
             _virtual_chunk_container_to_config,
             location_from_config,
-            storage_to_config,
-            storage_to_location,
         )
 
         _validate_name(name)
 
+        # icechunk.Storage has no serialization API, so a catalog entry persists a
+        # serializable storage_config to reopen the dataset later. A StorageSpec yields
+        # one losslessly; a raw Storage cannot, so its config must be supplied via
+        # storage_config= (else the entry has none — to_xarray() then needs storage=).
         if isinstance(storage, StorageSpec):
             ic_storage = storage.build()
-            spec_config = storage.to_config()
-            spec_location = location_from_config(spec_config)
+            spec_config = storage_config or storage.to_config()
         else:
             ic_storage = storage
-            spec_config = None
-            spec_location = None
-            if storage_config is None:
-                warnings.warn(
-                    "register() given a raw icechunk.Storage; storage_config is being "
-                    "recovered by parsing str(storage), which depends on an undocumented "
-                    "icechunk repr and may break on upgrade. Prefer "
-                    "basal.storage.s3_storage(...) (StorageSpec) or pass storage_config= "
-                    "explicitly for a stable, version-independent config.",
-                    stacklevel=2,
-                )
+            spec_config = storage_config  # None for a raw Storage with no config
 
         derived = (
             _derive_metadata_from_store(
@@ -203,14 +224,15 @@ class IcechunkCatalog:
             else {}
         )
 
-        derived_storage_config = (
-            storage_config or spec_config or storage_to_config(ic_storage)
+        derived_storage_config = spec_config
+        derived_location = metadata.pop("location", None) or (
+            location_from_config(spec_config) if spec_config else None
         )
-        derived_location = (
-            metadata.pop("location", None)
-            or spec_location
-            or storage_to_location(ic_storage)
-        )
+        if not derived_location:
+            raise ValueError(
+                f"Cannot determine location for '{name}'. Pass a StorageSpec, "
+                "storage_config=, or location= explicitly."
+            )
 
         # Serialize VirtualChunkContainer details from config when provided.
         virtual_chunk_containers_config = None
@@ -299,10 +321,10 @@ class IcechunkCatalog:
         self._commit_entry(name, entry_meta)
 
     def _commit_entry(self, name: str, entry_meta: dict[str, Any]) -> None:
-        """Create the entry branch (or reuse a tombstoned one) and commit metadata.
+        """Create the entry branch (or reuse a deregistered one) and commit metadata.
 
-        Raises if the branch exists and is not soft-deleted. A tombstoned branch is
-        reused, so re-registering a deregistered name succeeds and clears the tombstone.
+        Raises if the branch exists and is not deregistered. A deregistered branch is
+        reused, so re-registering that name succeeds and clears the deregistered marker.
         """
         existing = name in self._repo.list_branches()
         if existing and not self._head_metadata(name).get(DELETED_KEY):
@@ -375,96 +397,49 @@ class IcechunkCatalog:
         storage: icechunk.Storage | None = None,
         config: icechunk.RepositoryConfig | None = None,
         derive_extent: bool = False,
+        time_only: bool = False,
         **fields: Any,
-    ) -> None:
-        """Refresh stable CF attrs + ``dataset_snapshot_id`` from the live store.
-
-        Explicit ``fields`` are applied on top of freshly derived attrs.
-        If ``storage`` is not provided, reconstructs from entry's stored
-        storage_config (requires entry was registered with storage_config=).
-        Pass ``config`` to update virtual_chunk_container prefixes in metadata.
-        Pass ``derive_extent=True`` to also refresh bbox and temporal bounds.
-        """
-        entry = self.get(name)
-        resolved = entry._resolve_storage(storage)
-        derived = _derive_metadata_from_store(
-            resolved, branch=branch, config=config, derive_extent=derive_extent
-        )
-        self.update(name, **{**derived, **fields})
-
-    def extend(
-        self,
-        name: str,
-        branch: str = "main",
-        storage: icechunk.Storage | None = None,
-        config: icechunk.RepositoryConfig | None = None,
     ) -> dict:
-        """Update end_datetime and dataset_snapshot_id from the latest time coordinate.
+        """Refresh metadata from the live store; return a diff of changed fields.
 
-        Cheaper than update_from_store — reads only the time coordinate array,
-        skips bbox and CF attr re-inspection. Intended for operational datasets
-        that append data in time (NWP forecasts, reanalyses, etc.).
+        By default re-derives stable CF attrs + ``dataset_snapshot_id`` (and bbox +
+        temporal bounds when ``derive_extent=True``). Pass ``time_only=True`` for the
+        cheap append path: reads only the time coordinate to refresh ``end_datetime``
+        and ``dataset_snapshot_id``, skipping CF/variable re-inspection — intended for
+        operational datasets that grow in time (NWP forecasts, reanalyses).
 
-        Returns a dict with the old and new values that changed:
-        {"dataset_snapshot_id": ("old", "new"), "end_datetime": ("old", "new")}
+        Explicit ``fields`` are applied on top of derived values. ``storage`` and
+        ``config`` are reconstructed from the entry's stored config when omitted
+        (requires the entry was registered with a storage_config).
+
+        Returns ``{field: (old, new)}`` for every field whose value changed.
         """
-        import xarray as xr
-
-        from .inspect import _TIME_NAMES, _find_coord, _np_dt_to_iso
-
         entry = self.get(name)
         resolved = entry._resolve_storage(storage)
-        resolved_config = entry._resolve_repo_config(config)
-
-        kwargs: dict = {}
-        if resolved_config is not None:
-            kwargs["config"] = resolved_config
-        repo = icechunk.Repository.open(resolved, **kwargs)
-        new_snapshot_id = repo.lookup_branch(branch)
-        session = repo.readonly_session(branch=branch)
-        ds = xr.open_zarr(session.store, consolidated=False)
-
-        time_da = _find_coord(ds, "time", _TIME_NAMES)
-        new_end: str | None = None
-        if time_da is not None and time_da.size > 0:
-            new_end = _np_dt_to_iso(time_da.values.max())
-
-        old_snapshot_id = entry.metadata.get("dataset_snapshot_id")
-        old_end = entry.metadata.get("end_datetime")
-
-        updates: dict = {"dataset_snapshot_id": new_snapshot_id}
-        if new_end is not None:
-            updates["end_datetime"] = new_end
-
-        merged = {**entry.metadata, **updates}
-        from .schema import validate
-
-        validate(merged)
-
-        old_end_str = old_end or "?"
-        new_end_str = new_end or "unchanged"
-        session_w = self._repo.writable_session(name)
-        session_w.commit(
-            f"extend {name}: {old_end_str} -> {new_end_str}",
-            metadata={**merged, EVENT_KEY: "updated"},
-            allow_empty=True,
-        )
-
-        diff: dict = {}
-        if old_snapshot_id != new_snapshot_id:
-            diff["dataset_snapshot_id"] = (old_snapshot_id, new_snapshot_id)
-        if old_end != new_end and new_end is not None:
-            diff["end_datetime"] = (old_end, new_end)
-        return diff
+        if time_only:
+            derived = _derive_time_extent(
+                resolved, branch=branch, config=entry._resolve_repo_config(config)
+            )
+        else:
+            derived = _derive_metadata_from_store(
+                resolved, branch=branch, config=config, derive_extent=derive_extent
+            )
+        updates = {**derived, **fields}
+        before = entry.metadata
+        self.update(name, **updates)
+        return {k: (before.get(k), v) for k, v in updates.items() if before.get(k) != v}
 
     def deregister(self, name: str, purge: bool = False) -> None:
         """Deregister an entry.
 
-        Soft-delete by default: commits a tombstone, retaining the branch and its
-        full commit history so the entry can be restored or re-registered. The
-        entry is excluded from ``list()`` and ``get()`` (unless ``include_deleted``).
+        Reversible by default: commits a ``deregistered`` marker at the branch HEAD,
+        keeping the branch and its full commit history so the entry can be restored or
+        the name re-registered. The entry is excluded from ``list()`` and ``get()``
+        (unless ``include_deleted``).
 
-        Pass ``purge=True`` to hard-delete the branch — irreversible, history lost.
+        Pass ``purge=True`` to delete the branch outright — irreversible, history lost
+        (the equivalent of ``git branch -D``). Reserve it for compliance erasure or
+        throwaway test entries.
         """
         if purge:
             self._repo.delete_branch(name)
@@ -479,7 +454,7 @@ class IcechunkCatalog:
         )
 
     def restore(self, name: str) -> None:
-        """Clear the tombstone on a soft-deleted entry, returning it to the catalog."""
+        """Clear the deregistered marker, committing the entry back into the catalog."""
         entry = self.get(name, include_deleted=True)
         if not self._head_metadata(name).get(DELETED_KEY):
             return

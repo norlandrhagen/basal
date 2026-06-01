@@ -11,6 +11,7 @@ httpx = pytest.importorskip("httpx")
 import xarray as xr  # noqa: E402
 from basal import IcechunkCatalog  # noqa: E402
 from basal.stac_api import create_app  # noqa: E402
+from basal.storage import local_filesystem_storage  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
@@ -23,13 +24,13 @@ def catalog(tmp_path):
 @pytest.fixture
 def fake_store(tmp_path):
     path = str(tmp_path / "ds.icechunk")
-    storage = icechunk.local_filesystem_storage(path)
-    repo = icechunk.Repository.create(storage)
+    spec = local_filesystem_storage(path)
+    repo = icechunk.Repository.create(spec.build())
     session = repo.writable_session("main")
     ds = xr.Dataset({"var": xr.DataArray([1.0, 2.0], dims=["x"])})
     ds.to_zarr(session.store, consolidated=False)
     session.commit("init")
-    return storage
+    return spec
 
 
 @pytest.fixture

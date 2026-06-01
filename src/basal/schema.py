@@ -15,8 +15,6 @@ RECOMMENDED_FIELDS: dict[str, str] = {
     "license": "SPDX identifier e.g. 'CC-BY-4.0' (STAC properties.license)",
     "tags": "List of keyword strings (STAC properties.keywords)",
     "doi": "Dataset DOI (STAC sci:doi extension)",
-    "layer_hints": "Per-variable rendering hints for map viewers: {var: {colormap, clim, ...}}",
-    "global_colormap": "Default colormap string applied to all variables (overridden by layer_hints per var)",
 }
 """Recommended metadata fields with descriptions and STAC spec equivalents.
 
@@ -50,10 +48,6 @@ def validate(metadata: dict) -> None:
     for field in ("start_datetime", "end_datetime"):
         if field in metadata:
             _validate_datetime_str(metadata[field], field)
-    if "layer_hints" in metadata:
-        _validate_layer_hints(metadata["layer_hints"])
-    if "global_colormap" in metadata:
-        _validate_global_colormap(metadata["global_colormap"])
 
 
 def _validate_bbox(bbox: object) -> None:
@@ -79,20 +73,3 @@ def _validate_datetime_str(val: object, field: str) -> None:
         datetime.fromisoformat(val.replace("Z", "+00:00"))
     except ValueError as err:
         raise ValueError(f"{field}={val!r} is not a valid ISO 8601 datetime") from err
-
-
-def _validate_layer_hints(hints: object) -> None:
-    if not isinstance(hints, dict):
-        raise ValueError("layer_hints must be a dict keyed by variable name")
-    for var, config in hints.items():
-        if not isinstance(config, dict):
-            raise ValueError(f"layer_hints[{var!r}] must be a dict")
-        if "clim" in config:
-            clim = config["clim"]
-            if not (isinstance(clim, list | tuple) and len(clim) == 2):
-                raise ValueError(f"layer_hints[{var!r}]['clim'] must be [min, max]")
-
-
-def _validate_global_colormap(val: object) -> None:
-    if not isinstance(val, str):
-        raise ValueError(f"global_colormap must be a string, got {type(val)}")

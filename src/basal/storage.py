@@ -1,14 +1,14 @@
 """Icechunk storage construction and configuration utilities.
 
-Two ways to record a dataset's storage config in the catalog:
+icechunk.Storage exposes no serialization API, so a catalog entry cannot persist a
+live Storage. basal records storage as a serializable config dict instead:
 
 - ``StorageSpec`` (preferred) — captures the exact kwargs passed to the icechunk
-  constructor, so ``to_config()`` is exact and version-independent. Build specs with
-  the ``basal.storage`` constructors (``s3_storage``, ``gcs_storage``, ...).
-- raw ``icechunk.Storage`` — config is recovered heuristically by parsing
-  ``str(storage)`` (``_parse_storage_repr``). icechunk exposes no serialization API, so
-  this depends on an undocumented repr format and can break on an icechunk upgrade.
-  ``register()`` warns when it falls back to this path.
+  constructor, so ``to_config()`` is lossless and version-independent. Build specs
+  with the ``basal.storage`` constructors (``s3_storage``, ``gcs_storage``, ...).
+- a hand-written ``storage_config`` dict (same keys as ``storage_from_config``).
+
+``storage_from_config`` rebuilds the live Storage from either.
 """
 
 from __future__ import annotations
@@ -101,74 +101,6 @@ def in_memory_storage() -> StorageSpec:
     return StorageSpec("in_memory", {})
 
 
-def _parse_storage_repr(storage: icechunk.Storage) -> dict[str, str]:
-    """Parse icechunk.Storage __str__ into a key-value dict.
-
-    Heuristic: depends on an undocumented repr format. Used only as the fallback
-    when register() is given a raw icechunk.Storage instead of a StorageSpec.
-    """
-    lines = str(storage).strip().splitlines()
-    data: dict[str, str] = {}
-    for line in lines[1:]:  # skip "<icechunk.Storage>"
-        if ": " in line:
-            key, _, value = line.partition(": ")
-            data[key.strip()] = value.strip()
-    return data
-
-
-def storage_to_config(storage: icechunk.Storage) -> dict[str, Any]:
-    """Derive a serializable config dict from an icechunk.Storage object.
-
-    The resulting dict can be stored in catalog metadata and later passed to
-    storage_from_config() to reconstruct the storage. Supports S3, GCS, local,
-    HTTP, and redirect storage types.
-
-    Note: from_env credentials cannot be detected from the repr and are omitted.
-    For private stores needing no-arg to_xarray(), pass storage_config= explicitly.
-    """
-    data = _parse_storage_repr(storage)
-    stype = data.get("type", "")
-
-    if "S3" in stype:
-        config: dict[str, Any] = {
-            "type": "s3",
-            "bucket": data["bucket"],
-            "prefix": data.get("prefix"),
-        }
-        if "region" in data:
-            config["region"] = data["region"]
-        if data.get("anonymous") == "True":
-            config["anonymous"] = True
-        if "endpoint_url" in data:
-            config["endpoint_url"] = data["endpoint_url"]
-        return config
-
-    if stype == "local filesystem":
-        return {"type": "local", "path": data["path"]}
-
-    if stype == "GCS":
-        config = {"type": "gcs", "bucket": data["bucket"], "prefix": data.get("prefix")}
-        if data.get("anonymous") == "True":
-            config["anonymous"] = True
-        return config
-
-    if stype == "HTTP":
-        return {"type": "http", "base_url": data["url"]}
-
-    if stype == "redirect":
-        return {"type": "redirect", "base_url": data["url"]}
-
-    if stype == "in-memory":
-        return {"type": "in_memory"}
-
-    return {}
-
-
-def storage_to_location(storage: icechunk.Storage) -> str:
-    """Derive a canonical location URL string from an icechunk.Storage object."""
-    return location_from_config(storage_to_config(storage))
-
-
 def location_from_config(config: dict) -> str:
     """Derive a canonical location URL string from a storage config dict."""
     stype = config.get("type")
@@ -200,7 +132,7 @@ def location_from_config(config: dict) -> str:
 def storage_from_config(config: dict) -> icechunk.Storage:
     """Reconstruct an icechunk.Storage from a serializable config dict.
 
-    Accepts dicts produced by storage_to_config() or hand-written dicts with
+    Accepts dicts produced by StorageSpec.to_config() or hand-written dicts with
     keys: type, bucket, prefix, region, anonymous, from_env, etc.
     No URL parsing — all parameters are explicit.
     """
@@ -348,8 +280,8 @@ def storage_from_location(location: str, **kwargs: Any) -> icechunk.Storage:
     """Parse a location URL into an icechunk Storage.
 
     Convenience utility for explicit use in scripts and tests.
-    Not called internally by the catalog — use storage_to_config() /
-    storage_from_config() for reproducible, credential-explicit construction.
+    Not called internally by the catalog — use a StorageSpec or storage_config
+    dict + storage_from_config() for reproducible, credential-explicit construction.
 
     Supported schemes:
       s3://bucket/prefix

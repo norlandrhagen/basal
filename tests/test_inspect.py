@@ -46,6 +46,12 @@ def _storage(path: str) -> icechunk.Storage:
     return icechunk.local_filesystem_storage(path)
 
 
+def _spec(path: str):
+    from basal.storage import local_filesystem_storage
+
+    return local_filesystem_storage(path)
+
+
 def test_inspect_store(dataset_store):
     info = inspect_store(_storage(dataset_store))
     assert "sst" in info["variables"]
@@ -77,7 +83,7 @@ def test_stable_attrs(dataset_store):
 def test_register_derives_cf_attrs(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
     catalog = IcechunkCatalog.create(catalog_storage)
-    catalog.register("sst", storage=_storage(dataset_store), owner="test-org")
+    catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
 
     entry = catalog.get("sst")
     assert entry.metadata["title"] == "Test SST Dataset"
@@ -91,7 +97,7 @@ def test_register_explicit_wins(tmp_path, dataset_store):
     catalog = IcechunkCatalog.create(catalog_storage)
     catalog.register(
         "sst",
-        storage=_storage(dataset_store),
+        storage=_spec(dataset_store),
         owner="test-org",
         title="My Override Title",
     )
@@ -101,7 +107,7 @@ def test_register_explicit_wins(tmp_path, dataset_store):
 def test_is_stale(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
     catalog = IcechunkCatalog.create(catalog_storage)
-    catalog.register("sst", storage=_storage(dataset_store), owner="test-org")
+    catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
     entry = catalog.get("sst")
 
     assert entry.is_stale() is False
@@ -116,7 +122,7 @@ def test_is_stale(tmp_path, dataset_store):
 def test_is_stale_virtual_raises(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
     catalog = IcechunkCatalog.create(catalog_storage)
-    catalog.register("sst", storage=_storage(dataset_store), owner="test-org")
+    catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
     catalog.update("sst", virtual_chunk_containers=["s3://some-bucket/"])
     entry = catalog.get("sst")
 

@@ -17,9 +17,9 @@ from basal.history import EVENT_KEY
 from basal.storage import (
     _repo_config_from_virtual_chunks,
     _virtual_chunk_container_to_config,
+    local_filesystem_storage,
+    s3_storage,
     storage_from_config,
-    storage_to_config,
-    storage_to_location,
 )
 
 
@@ -32,13 +32,13 @@ def catalog(tmp_path):
 @pytest.fixture
 def fake_store(tmp_path):
     path = str(tmp_path / "fake_dataset")
-    storage = icechunk.local_filesystem_storage(path)
-    repo = icechunk.Repository.create(storage)
+    spec = local_filesystem_storage(path)
+    repo = icechunk.Repository.create(spec.build())
     session = repo.writable_session("main")
     ds = xr.Dataset({"var": xr.DataArray([1.0], dims=["x"])})
     ds.to_zarr(session.store, consolidated=False)
     session.commit("init")
-    return storage
+    return spec
 
 
 # --- name validation ---
@@ -167,18 +167,16 @@ def test_public_exports():
 # --- storage serialization roundtrip ---
 
 
-def test_storage_to_config_local(tmp_path):
+def test_storage_spec_to_config_local(tmp_path):
     path = str(tmp_path / "store")
-    s = icechunk.local_filesystem_storage(path)
-    assert storage_to_config(s) == {"type": "local", "path": path}
+    assert local_filesystem_storage(path).to_config() == {"type": "local", "path": path}
 
 
-def test_storage_to_config_s3():
-    s = icechunk.s3_storage(
+def test_storage_spec_to_config_s3():
+    spec = s3_storage(
         bucket="my-bucket", prefix="my/prefix", region="us-west-2", anonymous=True
     )
-    config = storage_to_config(s)
-    assert config == {
+    assert spec.to_config() == {
         "type": "s3",
         "bucket": "my-bucket",
         "prefix": "my/prefix",
@@ -187,18 +185,11 @@ def test_storage_to_config_s3():
     }
 
 
-def test_storage_to_location_local(tmp_path):
+def test_storage_spec_roundtrip_build(tmp_path):
     path = str(tmp_path / "store")
-    assert (
-        storage_to_location(icechunk.local_filesystem_storage(path)) == f"file://{path}"
-    )
-
-
-def test_storage_to_location_s3():
-    s = icechunk.s3_storage(
-        bucket="my-bucket", prefix="my/prefix", region="us-west-2", anonymous=True
-    )
-    assert storage_to_location(s) == "s3://my-bucket/my/prefix"
+    spec = local_filesystem_storage(path)
+    rebuilt = storage_from_config(spec.to_config())
+    assert rebuilt is not None
 
 
 def test_storage_from_config_unknown_raises():
@@ -208,8 +199,8 @@ def test_storage_from_config_unknown_raises():
 
 def test_register_derives_location_and_config(tmp_path):
     data_path = tmp_path / "ds"
-    storage = icechunk.local_filesystem_storage(str(data_path))
-    repo = icechunk.Repository.create(storage)
+    spec = local_filesystem_storage(str(data_path))
+    repo = icechunk.Repository.create(spec.build())
     session = repo.writable_session("main")
     xr.Dataset({"v": xr.DataArray([1.0, 2.0], dims=["x"])}).to_zarr(
         session.store, consolidated=False
@@ -219,7 +210,7 @@ def test_register_derives_location_and_config(tmp_path):
     cat = IcechunkCatalog.create(
         icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
     )
-    cat.register("v", storage=storage)
+    cat.register("v", storage=spec)
 
     entry = cat.get("v")
     assert entry.location == f"file://{data_path}"

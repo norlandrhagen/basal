@@ -17,17 +17,20 @@ def catalog(tmp_path):
 
 @pytest.fixture
 def fake_store(tmp_path):
-    """Minimal local icechunk repo with a zarr array — used as storage= in register() calls."""
+    """Minimal local icechunk repo with a zarr array — used as storage= in register() calls.
+
+    Returns a StorageSpec (the preferred, serializable form) rather than a raw Storage.
+    """
     import xarray as xr
 
     path = str(tmp_path / "fake_dataset")
-    storage = icechunk.local_filesystem_storage(path)
-    repo = icechunk.Repository.create(storage)
+    spec = st.local_filesystem_storage(path)
+    repo = icechunk.Repository.create(spec.build())
     session = repo.writable_session("main")
     ds = xr.Dataset({"var": xr.DataArray([1.0, 2.0], dims=["x"])})
     ds.to_zarr(session.store, consolidated=False)
     session.commit("init")
-    return storage
+    return spec
 
 
 # --- Core Catalog Tests ---
@@ -106,40 +109,6 @@ def test_missing_required_field_raises():
 
     with pytest.raises(ValueError, match="Missing required fields"):
         validate({"location": "s3://bucket/sst/"})
-
-
-def test_validate_layer_hints():
-    from basal.schema import validate
-
-    base = {"location": "s3://bucket/sst/", "format": "icechunk"}
-
-    # valid
-    validate(
-        {**base, "layer_hints": {"t2m": {"colormap": "RdBu_r", "clim": [-40, 40]}}}
-    )
-    validate(
-        {
-            **base,
-            "layer_hints": {"t2m": {"clim": [0, 1]}, "precip": {"colormap": "Blues"}},
-        }
-    )
-    validate({**base, "global_colormap": "viridis"})
-
-    # invalid layer_hints type
-    with pytest.raises(ValueError, match="layer_hints must be a dict"):
-        validate({**base, "layer_hints": "viridis"})
-
-    # invalid per-var type
-    with pytest.raises(ValueError, match="must be a dict"):
-        validate({**base, "layer_hints": {"t2m": "bad"}})
-
-    # invalid clim length
-    with pytest.raises(ValueError, match="clim.*min, max"):
-        validate({**base, "layer_hints": {"t2m": {"clim": [0]}}})
-
-    # invalid global_colormap type
-    with pytest.raises(ValueError, match="global_colormap must be a string"):
-        validate({**base, "global_colormap": 42})
 
 
 # --- Update ---
@@ -399,6 +368,15 @@ def test_update_all_from_store_warns_no_storage_config(catalog, fake_store):
         catalog.update_all_from_store()
 
 
+def test_update_from_store_time_only(catalog, geo_store):
+    # geo_store has a time coord spanning 2020-2022; time_only refreshes end_datetime
+    # and dataset_snapshot_id from it and returns the diff.
+    catalog.register("clim", storage=geo_store)
+    diff = catalog.update_from_store("clim", time_only=True)
+    assert "end_datetime" in diff
+    assert catalog.get("clim").metadata["end_datetime"].startswith("2022")
+
+
 # --- infer_extent / derive_extent ---
 
 
@@ -408,8 +386,8 @@ def geo_store(tmp_path):
     import xarray as xr
 
     path = str(tmp_path / "geo_dataset")
-    storage = icechunk.local_filesystem_storage(path)
-    repo = icechunk.Repository.create(storage)
+    spec = st.local_filesystem_storage(path)
+    repo = icechunk.Repository.create(spec.build())
     session = repo.writable_session("main")
 
     lat = np.array([-10.0, 0.0, 10.0])
@@ -421,7 +399,7 @@ def geo_store(tmp_path):
     )
     ds.to_zarr(session.store, consolidated=False)
     session.commit("init")
-    return storage
+    return spec
 
 
 def test_infer_extent(catalog, geo_store):
@@ -497,20 +475,31 @@ def test_register_with_storage_spec_no_warning(catalog):
     assert entry.metadata["storage_config"]["type"] == "s3"
 
 
-def test_register_raw_storage_warns(catalog, fake_store):
-    with pytest.warns(UserWarning, match="raw icechunk.Storage"):
-        catalog.register("raw", storage=fake_store, location="s3://b/raw")
+def test_register_raw_storage_without_config_omits_storage_config(catalog, fake_store):
+    # A raw icechunk.Storage cannot be serialized: the entry is created (location is
+    # explicit) but carries no storage_config — to_xarray() then needs storage=.
+    catalog.register(
+        "raw", storage=fake_store.build(), location="s3://b/raw", inspect=False
+    )
+    entry = catalog.get("raw")
+    assert entry.location == "s3://b/raw"
+    assert "storage_config" not in entry.metadata
 
 
-def test_register_raw_storage_with_explicit_config_no_warning(catalog, fake_store):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        catalog.register(
-            "rawcfg",
-            storage=fake_store,
-            location="s3://b/rawcfg",
-            storage_config={"type": "s3", "bucket": "b", "prefix": "rawcfg"},
-        )
+def test_register_raw_storage_no_location_raises(catalog, fake_store):
+    with pytest.raises(ValueError, match="Cannot determine location"):
+        catalog.register("raw", storage=fake_store.build(), inspect=False)
+
+
+def test_register_raw_storage_with_explicit_config(catalog, fake_store):
+    catalog.register(
+        "rawcfg",
+        storage=fake_store.build(),
+        location="s3://b/rawcfg",
+        storage_config={"type": "s3", "bucket": "b", "prefix": "rawcfg"},
+        inspect=False,
+    )
+    assert catalog.get("rawcfg").metadata["storage_config"]["bucket"] == "b"
 
 
 # --- soft-delete (WS2) ---
