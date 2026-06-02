@@ -27,7 +27,7 @@ requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
-docs = ["mkdocs-material>=9.0"]
+docs = ["mkdocs-material>=9.0", "markdown-exec>=1.0"]
 dev = [
     "pytest>=8.0.0",
     "ipdb",
