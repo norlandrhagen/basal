@@ -8,7 +8,7 @@ A small, serverless data catalog **prototype** built on [Icechunk](https://icech
 
 ## Concept
 
-Earth science catalogs seems to fall into two categories: a managed centralized database or a local collection of files (STAC json, intake yaml, etc.). `basal` aims somewhere in the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage. By using a 'meta' Icechunk store as the catalog, we take advantage of the cloud-native optimistic concurrency.
+Earth science catalogs seem to fall into two categories: a managed centralized database or a local collection of files (STAC json, intake yaml, etc.). `basal` aims somewhere in the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage. By using a 'meta' Icechunk store as the catalog, we take advantage of the cloud-native optimistic concurrency.
 
 Each dataset is registered as a branch whose HEAD snapshot carries that entry's metadata. A single read returns all entries in your catalog.
 
@@ -20,9 +20,9 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/  ← dataset entry
 
 ## Design principles
 
-- **Minimal catalog field hard requirements** Only `location` and `format` are required.
-- **Domain-specific metadata lives in a free-form blob.** ie, shove dataset metadata in or leave it very plain.
-- **Search is a layer above, not baked in.** We can (optionally) add on duckdb to search dataset similarity. 
+- **Minimal catalog field hard requirements.** Only `location` and `format` are required.
+- **Domain-specific metadata lives in a free-form blob.** i.e., shove dataset metadata in or leave it very plain.
+- **Search is a layer above, not baked in.** We can (optionally) add on DuckDB to search dataset similarity. 
 - **No server, no database.** The catalog is an Icechunk repo in object storage.
 - **One branch per entry.** Branches give independent commit histories and concurrent `register()` calls shouldn't conflict.
 
@@ -58,6 +58,10 @@ print(f'<div style="overflow-x:auto">{catalog._repr_html_()}</div>')
 ```
 
 ## Quickstart
+
+```python
+entry = catalog.get("noaa-gfs-analysis")
+```
 
 ```python exec="true" html="true" session="index"
 entry = catalog.get("noaa-gfs-analysis")

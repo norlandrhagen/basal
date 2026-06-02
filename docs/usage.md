@@ -188,15 +188,23 @@ def _entries_html(entries, title=""):
 
 Filter by temporal coverage:
 
-```python exec="true" html="true" session="usage"
+```python
 entries = catalog.filter(time_start="2021", time_end="*")   # open-ended from 2021
+```
+
+```python exec="true" html="true" session="usage"
+entries = catalog.filter(time_start="2021", time_end="*")
 print(_entries_html(entries, "time_start='2021', time_end='*'"))
 ```
 
 Filter by bounding box (Europe):
 
-```python exec="true" html="true" session="usage"
+```python
 entries = catalog.filter(bbox=(-10.0, 35.0, 40.0, 70.0))   # [W, S, E, N]
+```
+
+```python exec="true" html="true" session="usage"
+entries = catalog.filter(bbox=(-10.0, 35.0, 40.0, 70.0))
 print(_entries_html(entries, "bbox=(-10, 35, 40, 70)"))
 ```
 
