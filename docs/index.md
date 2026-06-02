@@ -52,6 +52,7 @@ storage = icechunk.s3_storage(
     bucket="carbonplan-share",
     prefix="basal/public_icechunk_stores",
     region="us-west-2",
+    anonymous=True,
 )
 catalog = Catalog.open(storage)
 print(f'<div style="overflow-x:auto">{catalog._repr_html_()}</div>')
