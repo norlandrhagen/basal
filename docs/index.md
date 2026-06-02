@@ -1,6 +1,6 @@
 # basal
 
-A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) with no external database.
+A small, serverless data catalog **prototype** built on [Icechunk](https://icechunk.io).
 
 *basal* as in the bottom layer of an ice sheet, not the herb.
 
@@ -8,7 +8,7 @@ A small, serverless dataset catalog built on [Icechunk 2](https://icechunk.io) w
 
 ## Concept
 
-Earth science catalogs fall into two categories: a managed centralized database or a local collection of files (STAC json, intake yaml). basal aims for the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage.
+Earth science catalogs seems to fall into two categories: a managed centralized database or a local collection of files (STAC json, intake yaml, etc.). `basal` aims somewhere in the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage. By using a 'meta' Icechunk store as the catalog, we take advantage of the cloud-native optimistic concurrency.
 
 Each dataset is registered as a branch whose HEAD snapshot carries that entry's metadata. A single read returns all entries in your catalog.
 
@@ -20,17 +20,16 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/  ← dataset entry
 
 ## Design principles
 
-- **Enforce nothing beyond what's needed to function.** Only `location` and `format` are required; both auto-derived.
-- **Domain-specific metadata lives in a free-form blob.** The protocol doesn't own your schema.
-- **Search is a layer above, not baked in.** Core is a Python filter; DuckDB adds SQL; similarity search adds vectors — each opt-in.
-- **Storage reads are explicit and bounded.** `register()` reads the store once at registration. `update_from_store()` and `entry.inspect()` are explicit opt-ins; all other operations are metadata-only.
+- **Minimal catalog field hard requirements** Only `location` and `format` are required.
+- **Domain-specific metadata lives in a free-form blob.** ie, shove dataset metadata in or leave it very plain.
+- **Search is a layer above, not baked in.** We can (optionally) add on duckdb to search dataset similarity. 
 - **No server, no database.** The catalog is an Icechunk repo in object storage.
-- **One branch per entry.** Branches give independent commit histories and concurrent `register()` calls never conflict — Icechunk transactions are branch-scoped. All branch HEADs are fetched in a single call.
+- **One branch per entry.** Branches give independent commit histories and concurrent `register()` calls shouldn't conflict.
 
 ## Install
 
 ```
-uv add basal
+uv add "git+https://github.com/norlandrhagen/basal"
 ```
 
 Optional extras:
@@ -42,7 +41,7 @@ uv add "basal[stac]"   # STAC API server
 
 ## Public catalog
 
-No credentials required.
+Here is an example catalog built from public Icechunk and Zarr stores.
 
 ```python exec="true" html="true" session="index"
 import icechunk
