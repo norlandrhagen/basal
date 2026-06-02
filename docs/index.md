@@ -70,6 +70,12 @@ print(f'<div style="overflow-x:auto">{entry._repr_html_()}</div>')
 
 ```python
 ds = entry.to_xarray()
+ds
+```
+
+```python exec="true" html="true" session="index"
+ds = entry.to_xarray()
+print(f'<div style="overflow-x:auto">{ds._repr_html_()}</div>')
 ```
 
 See [Usage](usage.md) for the full API.
