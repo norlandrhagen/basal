@@ -14,9 +14,12 @@ dependencies = [
 
 [project.optional-dependencies]
 search = ["fastembed>=0.2.0", "duckdb>=1.5.2", "arro3-core>=0.1.0"]
-server = [
+stac = [
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.20.0",
+]
+docs = [
+    "markdown-exec>=1.12.1",
 ]
 
 [build-system]
@@ -24,6 +27,7 @@ requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [dependency-groups]
+docs = ["mkdocs-material>=9.0"]
 dev = [
     "pytest>=8.0.0",
     "ipdb",

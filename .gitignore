@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+js/
+.vscode/
+.ruff_cache/
+.pytest_cache/
+.claude/
+
