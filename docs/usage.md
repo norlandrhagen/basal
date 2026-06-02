@@ -167,6 +167,7 @@ storage = icechunk.s3_storage(
     bucket="carbonplan-share",
     prefix="basal/public_icechunk_stores",
     region="us-west-2",
+    anonymous=True,
 )
 catalog = Catalog.open(storage)
 warnings.filterwarnings("ignore")
