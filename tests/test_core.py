@@ -3,7 +3,7 @@ import warnings
 import icechunk
 import numpy as np
 import pytest
-from basal import IcechunkCatalog
+from basal import Catalog
 from basal import storage as st
 from basal.search import similar, similar_by_schema
 
@@ -12,7 +12,7 @@ from basal.search import similar, similar_by_schema
 def catalog(tmp_path):
     path = str(tmp_path / "test_catalog")
     storage = icechunk.local_filesystem_storage(path)
-    return IcechunkCatalog.open_or_create(storage)
+    return Catalog.open_or_create(storage)
 
 
 @pytest.fixture
@@ -40,12 +40,12 @@ def test_open_or_create(tmp_path, fake_store):
     path = str(tmp_path / "persistent_catalog")
     storage = icechunk.local_filesystem_storage(path)
 
-    c1 = IcechunkCatalog.open_or_create(storage)
+    c1 = Catalog.open_or_create(storage)
     c1.register(
         "sst", storage=fake_store, location="s3://bucket/sst/", owner="carbonplan"
     )
 
-    c2 = IcechunkCatalog.open_or_create(storage)
+    c2 = Catalog.open_or_create(storage)
     assert len(c2.list()) == 1
     assert c2.get("sst").name == "sst"
 

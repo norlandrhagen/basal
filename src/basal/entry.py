@@ -9,7 +9,7 @@ import icechunk
 from .storage import _repo_config_from_virtual_chunks, default_virtual_chunk_credentials
 
 if TYPE_CHECKING:
-    from .catalog import IcechunkCatalog
+    from .catalog import Catalog
 
 
 @dataclass
@@ -258,7 +258,7 @@ class Entry:
 
     def infer_extent(
         self,
-        catalog: IcechunkCatalog,
+        catalog: Catalog,
         *,
         update: bool = True,
         branch: str | None = "main",
@@ -300,7 +300,7 @@ class Entry:
 
     def similar(
         self,
-        catalog: IcechunkCatalog,
+        catalog: Catalog,
         n: int = 5,
         embed_fn: Callable[[list[str]], Any] | None = None,
     ) -> list[tuple[Entry, float]]:

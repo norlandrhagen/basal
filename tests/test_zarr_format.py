@@ -6,13 +6,13 @@ import icechunk
 import numpy as np
 import pytest
 import xarray as xr
-from basal import IcechunkCatalog
+from basal import Catalog
 
 
 @pytest.fixture
 def catalog(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    return IcechunkCatalog.open_or_create(storage)
+    return Catalog.open_or_create(storage)
 
 
 @pytest.fixture

@@ -6,7 +6,7 @@ import icechunk
 import numpy as np
 import pytest
 import xarray as xr
-from basal import Entry, IcechunkCatalog
+from basal import Catalog, Entry
 from basal.catalog import (
     FACET_DENYLIST,
     _derive_metadata_from_store,
@@ -26,7 +26,7 @@ from basal.storage import (
 @pytest.fixture
 def catalog(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    return IcechunkCatalog.create(storage)
+    return Catalog.create(storage)
 
 
 @pytest.fixture
@@ -158,7 +158,7 @@ def test_derive_metadata_from_store(tmp_path):
 def test_public_exports():
     import basal as pkg
 
-    assert pkg.IcechunkCatalog is IcechunkCatalog
+    assert pkg.Catalog is Catalog
     assert pkg.Entry is Entry
     assert hasattr(pkg, "search")
     assert hasattr(pkg, "inspect")
@@ -207,9 +207,7 @@ def test_register_derives_location_and_config(tmp_path):
     )
     session.commit("init")
 
-    cat = IcechunkCatalog.create(
-        icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    )
+    cat = Catalog.create(icechunk.local_filesystem_storage(str(tmp_path / "catalog")))
     cat.register("v", storage=spec)
 
     entry = cat.get("v")
@@ -218,7 +216,7 @@ def test_register_derives_location_and_config(tmp_path):
 
 
 def test_register_location_override(tmp_path, fake_store):
-    cat = IcechunkCatalog.create(icechunk.local_filesystem_storage(str(tmp_path / "c")))
+    cat = Catalog.create(icechunk.local_filesystem_storage(str(tmp_path / "c")))
     cat.register("x", storage=fake_store, location="s3://custom/override")
     assert cat.get("x").location == "s3://custom/override"
 

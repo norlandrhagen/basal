@@ -2,7 +2,7 @@ import icechunk
 import numpy as np
 import pytest
 import xarray as xr
-from basal import IcechunkCatalog
+from basal import Catalog
 from basal.inspect import inspect_store, stable_attrs
 
 
@@ -82,7 +82,7 @@ def test_stable_attrs(dataset_store):
 
 def test_register_derives_cf_attrs(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    catalog = IcechunkCatalog.create(catalog_storage)
+    catalog = Catalog.create(catalog_storage)
     catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
 
     entry = catalog.get("sst")
@@ -94,7 +94,7 @@ def test_register_derives_cf_attrs(tmp_path, dataset_store):
 
 def test_register_explicit_wins(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    catalog = IcechunkCatalog.create(catalog_storage)
+    catalog = Catalog.create(catalog_storage)
     catalog.register(
         "sst",
         storage=_spec(dataset_store),
@@ -106,7 +106,7 @@ def test_register_explicit_wins(tmp_path, dataset_store):
 
 def test_is_stale(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    catalog = IcechunkCatalog.create(catalog_storage)
+    catalog = Catalog.create(catalog_storage)
     catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
     entry = catalog.get("sst")
 
@@ -121,7 +121,7 @@ def test_is_stale(tmp_path, dataset_store):
 
 def test_is_stale_virtual_raises(tmp_path, dataset_store):
     catalog_storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    catalog = IcechunkCatalog.create(catalog_storage)
+    catalog = Catalog.create(catalog_storage)
     catalog.register("sst", storage=_spec(dataset_store), owner="test-org")
     catalog.update("sst", virtual_chunk_containers=["s3://some-bucket/"])
     entry = catalog.get("sst")

@@ -22,11 +22,11 @@ import numpy as np
 if TYPE_CHECKING:
     import duckdb
 
-    from .catalog import IcechunkCatalog
+    from .catalog import Catalog
     from .entry import Entry
 
 
-def _build_connection(catalog: IcechunkCatalog) -> duckdb.DuckDBPyConnection:
+def _build_connection(catalog: Catalog) -> duckdb.DuckDBPyConnection:
     import arro3.core as ac
     import duckdb
 
@@ -48,7 +48,7 @@ def _build_connection(catalog: IcechunkCatalog) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def sql(catalog: IcechunkCatalog, query: str) -> list[tuple]:
+def sql(catalog: Catalog, query: str) -> list[tuple]:
     """Run SQL over entries(name VARCHAR, snapshot_id VARCHAR, metadata JSON).
 
     Use metadata->>'field' for scalar extraction.
@@ -63,7 +63,7 @@ def sql(catalog: IcechunkCatalog, query: str) -> list[tuple]:
     return _build_connection(catalog).execute(query).fetchall()
 
 
-def sql_df(catalog: IcechunkCatalog, query: str):
+def sql_df(catalog: Catalog, query: str):
     """Same as sql() but returns a pandas DataFrame."""
     return _build_connection(catalog).execute(query).df()
 
@@ -106,7 +106,7 @@ def _entry_text(entry: Entry) -> str:
 
 
 def similar(
-    catalog: IcechunkCatalog,
+    catalog: Catalog,
     query: str,
     embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
     top_k: int = 5,
@@ -265,7 +265,7 @@ def _info_to_text(name: str, info: dict[str, Any]) -> str:
 
 
 def similar_by_schema(
-    catalog: IcechunkCatalog,
+    catalog: Catalog,
     query: str,
     pre_filter: str | None = None,
     embed_fn: Callable[[list[str]], list[list[float]]] | None = None,

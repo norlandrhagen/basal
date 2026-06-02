@@ -1,5 +1,5 @@
 from . import inspect, search, storage
-from .catalog import IcechunkCatalog
+from .catalog import Catalog
 from .entry import Entry
 from .storage import (
     StorageSpec,
@@ -7,7 +7,7 @@ from .storage import (
 )
 
 __all__ = [
-    "IcechunkCatalog",
+    "Catalog",
     "Entry",
     "search",
     "inspect",

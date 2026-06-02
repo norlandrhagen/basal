@@ -1,7 +1,7 @@
 import icechunk
 import pytest
 import xarray as xr
-from basal import IcechunkCatalog
+from basal import Catalog
 from basal.search import similar, sql, sql_df
 from basal.storage import storage_from_location
 
@@ -24,7 +24,7 @@ def fake_store(tmp_path):
 @pytest.fixture
 def catalog(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    c = IcechunkCatalog.create(storage)
+    c = Catalog.create(storage)
     sst = _make_dataset_store(str(tmp_path / "data-sst"))
     air = _make_dataset_store(str(tmp_path / "data-air"))
     wind = _make_dataset_store(str(tmp_path / "data-wind"))
@@ -126,7 +126,7 @@ def test_similar_ranks_correctly(catalog):
 
 def test_similar_empty_catalog(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "empty"))
-    cat = IcechunkCatalog.create(storage)
+    cat = Catalog.create(storage)
     results = similar(cat, "ocean", embed_fn=lambda texts: [[1.0] * 4] * len(texts))
     assert results == []
 
@@ -148,9 +148,7 @@ def test_history_name_filter(catalog):
 
 def test_history_events(tmp_path):
     store = _make_dataset_store(str(tmp_path / "sst"))
-    cat = IcechunkCatalog.create(
-        icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    )
+    cat = Catalog.create(icechunk.local_filesystem_storage(str(tmp_path / "catalog")))
     cat.register("sst", storage=store, location="s3://b/sst", owner="noaa")
     cat.update("sst", title="SST v2")
     cat.deregister("sst")
@@ -164,7 +162,7 @@ def test_history_events(tmp_path):
 
 def test_history_limit(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    cat = IcechunkCatalog.create(storage)
+    cat = Catalog.create(storage)
     for i in range(5):
         store = _make_dataset_store(str(tmp_path / f"ds{i}"))
         cat.register(f"ds{i}", storage=store, location=f"s3://b/ds{i}", owner="org")
