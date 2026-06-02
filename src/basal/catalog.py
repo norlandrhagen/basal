@@ -117,7 +117,7 @@ def _derive_time_extent(
     return derived
 
 
-class IcechunkCatalog:
+class Catalog:
     """Dataset catalog backed by a single Icechunk repository.
 
     Each registered dataset is an orphan-style branch whose HEAD snapshot
@@ -129,19 +129,19 @@ class IcechunkCatalog:
         self._repo = repo
 
     @classmethod
-    def create(cls, storage: icechunk.Storage) -> IcechunkCatalog:
+    def create(cls, storage: icechunk.Storage) -> Catalog:
         repo = icechunk.Repository.create(storage)
         session = repo.writable_session("main")
         session.commit("init catalog", allow_empty=True)
         return cls(repo)
 
     @classmethod
-    def open(cls, storage: icechunk.Storage) -> IcechunkCatalog:
+    def open(cls, storage: icechunk.Storage) -> Catalog:
         repo = icechunk.Repository.open(storage)
         return cls(repo)
 
     @classmethod
-    def open_or_create(cls, storage: icechunk.Storage) -> IcechunkCatalog:
+    def open_or_create(cls, storage: icechunk.Storage) -> Catalog:
         if icechunk.Repository.exists(storage):
             return cls.open(storage)
         return cls.create(storage)
@@ -924,7 +924,7 @@ class IcechunkCatalog:
             f for f in all_fields if f not in RECOMMENDED_FIELDS
         )
 
-        table = Table(title=f"IcechunkCatalog summary ({n} entries)", show_header=True)
+        table = Table(title=f"Catalog summary ({n} entries)", show_header=True)
         table.add_column("field", style="bold")
         table.add_column("coverage", justify="right")
         table.add_column("bar")
@@ -983,7 +983,7 @@ class IcechunkCatalog:
         from rich.table import Table
 
         entries = sorted(self.list(), key=lambda e: e.name)
-        table = Table(title=f"IcechunkCatalog ({len(entries)} entries)")
+        table = Table(title=f"Catalog ({len(entries)} entries)")
         table.add_column("name", style="bold")
         table.add_column("owner")
         table.add_column("title")
@@ -1000,7 +1000,7 @@ class IcechunkCatalog:
 
     def __repr__(self) -> str:
         n = len([b for b in self._repo.list_branches() if b != "main"])
-        return f"<IcechunkCatalog with {n} entries>"
+        return f"<Catalog with {n} entries>"
 
     def _repr_html_(self) -> str:
         entries = sorted(self.list(), key=lambda e: e.name)
@@ -1012,7 +1012,7 @@ class IcechunkCatalog:
         )
         return (
             f"<table><thead><tr>"
-            f"<th colspan=4>IcechunkCatalog ({len(entries)} entries)</th></tr>"
+            f"<th colspan=4>Catalog ({len(entries)} entries)</th></tr>"
             f"<tr><th>name</th><th>owner</th><th>title</th><th>location</th></tr>"
             f"</thead><tbody>{rows}</tbody></table>"
         )

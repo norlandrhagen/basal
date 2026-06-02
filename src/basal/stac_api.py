@@ -1,4 +1,4 @@
-"""Thin STAC API server backed by a basal IcechunkCatalog.
+"""Thin STAC API server backed by a basal Catalog.
 
 Usage — programmatic:
     from basal.stac_api import create_app
@@ -16,7 +16,7 @@ Env vars:
     BASAL_ANONYMOUS   "true" / "1" for anonymous access (default: false)
     BASAL_COLLECTION  STAC collection id (default: "basal-catalog")
 
-Requires basal[server]: uv add "basal[server]"
+Requires basal[stac]: uv add "basal[stac]"
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .catalog import IcechunkCatalog
+    from .catalog import Catalog
     from .entry import Entry
 
 STAC_VERSION = "1.0.0"
@@ -122,13 +122,13 @@ def _bbox_overlaps(entry_bbox: list[float], query_bbox: list[float]) -> bool:
     return ee >= w and ew <= e and en >= s and es <= n
 
 
-def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
+def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
     """Create a STAC API FastAPI app backed by ``catalog``.
 
     Parameters
     ----------
     catalog:
-        Opened IcechunkCatalog to serve.
+        Opened Catalog to serve.
     collection_id:
         STAC collection id used in all URLs and responses.
     """
@@ -138,7 +138,7 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
 
     except ImportError:
         raise ImportError(
-            "basal[server] is required. Install with: uv add 'basal[server]'"
+            "basal[stac] is required. Install with: uv add 'basal[stac]'"
         ) from None
 
     app = FastAPI(title="basal STAC API", version="1.0.0")
@@ -399,11 +399,11 @@ def create_app(catalog: IcechunkCatalog, collection_id: str = "basal-catalog"):
     return app
 
 
-def _catalog_from_env() -> IcechunkCatalog:
-    """Build IcechunkCatalog from env vars."""
+def _catalog_from_env() -> Catalog:
+    """Build Catalog from env vars."""
     import icechunk
 
-    from .catalog import IcechunkCatalog
+    from .catalog import Catalog
 
     bucket = os.environ["BASAL_BUCKET"]
     prefix = os.environ.get("BASAL_PREFIX", "")
@@ -412,7 +412,7 @@ def _catalog_from_env() -> IcechunkCatalog:
     storage = icechunk.s3_storage(
         bucket=bucket, prefix=prefix, region=region, anonymous=anon
     )
-    return IcechunkCatalog.open(storage)
+    return Catalog.open(storage)
 
 
 # Module-level app for `uvicorn basal.stac_api:app`.

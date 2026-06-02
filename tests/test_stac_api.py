@@ -9,7 +9,7 @@ fastapi = pytest.importorskip("fastapi")
 httpx = pytest.importorskip("httpx")
 
 import xarray as xr  # noqa: E402
-from basal import IcechunkCatalog  # noqa: E402
+from basal import Catalog  # noqa: E402
 from basal.stac_api import create_app  # noqa: E402
 from basal.storage import local_filesystem_storage  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 @pytest.fixture
 def catalog(tmp_path):
     storage = icechunk.local_filesystem_storage(str(tmp_path / "catalog"))
-    return IcechunkCatalog.open_or_create(storage)
+    return Catalog.open_or_create(storage)
 
 
 @pytest.fixture
