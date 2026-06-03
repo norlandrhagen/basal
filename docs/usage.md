@@ -67,6 +67,17 @@ Use `register_or_update()` when the dataset may already exist — it registers o
 action = catalog.register_or_update("my-dataset", storage=dataset_storage, owner="my-org")
 ```
 
+Each `register()` is one commit (~500 ms per entry on S3 — see [Scaling](#scaling)), so
+registering many datasets is a batch/cron job, not an interactive call. Loop over your
+sources with `register_or_update()` (idempotent, safe to re-run), expect minutes for
+hundreds of entries on S3, and run `expire()` afterward if the run included updates:
+
+```python
+for name, storage, meta in sources:
+    catalog.register_or_update(name, storage=storage, **meta)
+catalog.expire(datetime.datetime.now(datetime.UTC))
+```
+
 ### Register a plain Zarr store
 
 ```python
@@ -144,9 +155,13 @@ entry.infer_extent(catalog, update=True)
 diff = catalog.update_from_store("noaa-hrrr-forecast", time_only=True)
 # {'dataset_snapshot_id': ('abc123', 'xyz789'), 'end_datetime': ('2026-04-01', '2026-04-28')}
 
-# Resync all entries
+# Resync all entries — one commit per entry (~500 ms each on S3), and each adds a
+# snapshot to that entry's history. Run on a schedule, then expire() afterward.
 catalog.update_all_from_store()
+catalog.expire(datetime.datetime.now(datetime.UTC))  # collapse the new snapshots
 ```
+
+See [Scaling](#scaling) for why bulk updates are an admin op and `expire()` matters.
 
 ## Inspect store metadata
 
@@ -227,12 +242,18 @@ stale = catalog.refresh() # {name: bool} across all entries
 
 ```python
 catalog.history()                         # 10 most recent ops across all entries
-catalog.history(name="noaa-gfs-analysis") # filter to one entry
+catalog.history(name="noaa-gfs-analysis") # filter to one entry (cheap)
 catalog.history(limit=50)
 # [{'event': 'registered', 'name': '...', 'timestamp': datetime(...), 'snapshot_id': '...'}, ...]
 ```
 
 Events: `registered`, `updated`, `deregistered`.
+
+!!! warning
+    History costs one snapshot lookup per record returned — a round-trip each on
+    object storage. The default `limit=10` is bounded; a large catalog-wide `limit`
+    over a deep history is slow (seconds on S3). Pass `name=` for per-entry history —
+    it skips non-matching branches and only touches that entry's snapshots.
 
 ## Search and discovery
 
@@ -296,7 +317,43 @@ All use DuckDB `array_cosine_similarity` — no external vector DB. Pass `use_sc
 
 ## Scaling
 
-`list()` reads every snapshot in the repo in a single call — cost grows with total commit history (entries × updates), not entry count alone. Bound it with `expire()`:
+basal runs on cloud object storage, where every commit and metadata read is a network
+round-trip. The numbers below are from S3 (`us-west-2`); local FS is roughly an order
+of magnitude cheaper but isn't the deployment target.
+
+**Reads are cheap, writes are the cost.** A read (`list`, `get`, `filter`, `facets`,
+`sql`) is essentially one S3 GET of the metadata graph; a write is one commit per
+entry, and each commit is a round-trip.
+
+| op | S3 | note |
+|---|---|---|
+| `register()` / entry | ~500 ms | one commit per entry; building a catalog is an admin bulk op |
+| warm `list()` (N=50) | ~24 ms | single metadata GET |
+| cold `list()` (first touch) | ~45–70 ms | no in-process cache yet |
+| `list()` after `expire()` | ~27 ms | independent of update history |
+| `get(name)` | ~45 ms | point lookup |
+| `history(name=…, limit=10)` | ~tens ms | per-entry, cheap |
+| catalog-wide `history(limit=1000)` | ~7 s | one lookup per snapshot — avoid large limits |
+
+### Where the dangers lurk
+
+Three independent axes, each with a different cost and fix:
+
+- **Wide** — many metadata keys / variables per entry. `list()`/`get()` cost grows
+  with total metadata bytes. The corner case (100 keys × 100 variables) is ~88 ms
+  `list` / ~127 ms `get` on S3 — visible but bounded, since it's still one GET. Keep
+  `variables` lean, or accept the cost. Climate stores with 50–100 CF variables sit here.
+- **Long** — many entries (large N). Reads stay cheap: `list()` is a single metadata
+  read regardless of N (tens of ms into the hundreds of entries). The cost is **writes** —
+  at ~500 ms/entry, registering 200 datasets is ~100 s. This is a one-time/cron admin
+  cost, not something users feel.
+- **Thick** — many commits per entry (frequent `update()`s). `list()` and especially
+  `history()` scale with total snapshots, and each snapshot is a round-trip. This is
+  the one that degrades silently over time.
+
+`expire()` is the lever for **thick** — it collapses old snapshots, keeping only
+current HEADs, and returns reads to baseline. Run it on a schedule for any
+update-heavy catalog:
 
 ```python
 import datetime
@@ -304,14 +361,12 @@ catalog.expire(datetime.datetime.now(datetime.UTC))  # keep only current HEADs
 catalog.expire(older_than, garbage_collect=True)      # also reclaim object storage
 ```
 
-Benchmark (local FS):
+### Admin vs. user
 
-| N entries | updates/entry | `list()` | after `expire()` |
-|---|---|---|---|
-| 100 | 0  | 1.1 ms  | 1.1 ms |
-| 100 | 10 | 9.2 ms  | 2.6 ms |
-| 500 | 0  | 5.5 ms  | 5.5 ms |
-| 500 | 10 | 40.2 ms | 5.6 ms |
+The split is clean: **users read, admins write.** Users get fast point lookups, list,
+filter, facets, and SQL (all tens of ms on S3) — the catalog is read-fast by design.
+Admins pay on writes: register/update in bulk (see below), then `expire()` so that
+write history never becomes user-facing read latency.
 
 ## STAC export
 

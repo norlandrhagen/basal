@@ -40,7 +40,12 @@ dev = [
     "basal[search]",
     "pytest-xdist>=3.8.0",
     "gcsfs>=2026.5.0",
+    "matplotlib>=3.10.9",
+    "pandas>=3.0.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"

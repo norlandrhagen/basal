@@ -86,13 +86,15 @@ def inspect_store(
     Parameters
     ----------
     storage:
-        Explicit icechunk.Storage for the dataset store. Use s3_config(),
-        gcs_config(), or local_config() from basal.storage to build.
+        Explicit icechunk.Storage for the dataset store. Build a StorageSpec with
+        s3_storage(), gcs_storage(), or local_filesystem_storage() from
+        basal.storage and call .build(), or pass a raw icechunk.Storage.
     branch:
         Branch to read from.
     config:
         Optional RepositoryConfig — required for stores with virtual chunk
-        containers. Use repo_config_from_virtual_chunks() to build from config dicts.
+        containers. Build with icechunk.RepositoryConfig and
+        set_virtual_chunk_container().
     derive_extent:
         If True, read lat/lon/time coordinate arrays to extract STAC-compatible
         bbox and start_datetime/end_datetime. Reads coordinate data (small arrays).

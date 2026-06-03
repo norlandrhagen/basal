@@ -514,7 +514,20 @@ class Catalog:
         return entries
 
     def history(self, name: str | None = None, limit: int = 10) -> list[dict]:
-        """Return catalog operation history, newest first. See ``history.collect_history``."""
+        """Return catalog operation history, newest first. See ``history.collect_history``.
+
+        Cost is ``limit`` snapshot lookups, each a round-trip on object storage. The
+        default ``limit=10`` is bounded; a large catalog-wide ``limit`` over a deep
+        history is expensive (seconds on S3). Prefer ``name=`` for per-entry history —
+        it skips non-matching branches and only looks up that entry's snapshots.
+        """
+        if name is None and limit > 100:
+            warnings.warn(
+                f"history(limit={limit}) with no name= does up to {limit} snapshot "
+                "lookups (one round-trip each on object storage). Pass name= for a "
+                "single entry, or use a smaller limit.",
+                stacklevel=2,
+            )
         return collect_history(self._repo, name=name, limit=limit)
 
     # --- search ---

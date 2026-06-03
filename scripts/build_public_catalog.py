@@ -1,5 +1,5 @@
 import icechunk
-from basal import IcechunkCatalog
+from basal import Catalog
 
 # ---------------------------------------------------------------------------
 # Catalog storage — writers need credentials; readers get anon access via CDN
@@ -12,7 +12,7 @@ catalog_storage = icechunk.s3_storage(
     from_env=True,
 )
 
-catalog = IcechunkCatalog.open_or_create(catalog_storage)
+catalog = Catalog.open_or_create(catalog_storage)
 
 
 # ---------------------------------------------------------------------------

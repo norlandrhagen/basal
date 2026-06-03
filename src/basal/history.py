@@ -20,7 +20,7 @@ EVENT_KEY = "__event__"
 def collect_history(
     repo: icechunk.Repository,
     name: str | None = None,
-    limit: int = 100,
+    limit: int = 10,
 ) -> list[dict]:
     """Return catalog operation history, newest first.
 
@@ -42,6 +42,10 @@ def collect_history(
             if k.branch == "main":
                 continue
             entry_name = k.branch
+            # Filter by name before lookup_snapshot — on object storage each lookup is
+            # a round-trip, so skip non-matching branches without paying for it.
+            if name is not None and entry_name != name:
+                continue
             snapshot_id = k.new_snap_id
             info = repo.lookup_snapshot(snapshot_id)
             meta = info.metadata or {}
@@ -55,12 +59,11 @@ def collect_history(
             if k.name == "main":
                 continue
             entry_name = k.name
+            if name is not None and entry_name != name:
+                continue
             event = "deregistered"
 
         else:
-            continue
-
-        if name is not None and entry_name != name:
             continue
 
         records.append(
