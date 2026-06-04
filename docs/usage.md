@@ -339,19 +339,19 @@ entry, and each commit is a round-trip.
 
 Three independent axes, each with a different cost and fix:
 
-- **Wide** — many metadata keys / variables per entry. `list()`/`get()` cost grows
+- **Metadata-heavy** — many metadata keys / variables per entry. `list()`/`get()` cost grows
   with total metadata bytes. The corner case (100 keys × 100 variables) is ~88 ms
   `list` / ~127 ms `get` on S3 — visible but bounded, since it's still one GET. Keep
   `variables` lean, or accept the cost. Climate stores with 50–100 CF variables sit here.
-- **Long** — many entries (large N). Reads stay cheap: `list()` is a single metadata
+- **Entry-heavy** — many entries (large N). Reads stay cheap: `list()` is a single metadata
   read regardless of N (tens of ms into the hundreds of entries). The cost is **writes** —
   at ~500 ms/entry, registering 200 datasets is ~100 s. This is a one-time/cron admin
   cost, not something users feel.
-- **Thick** — many commits per entry (frequent `update()`s). `list()` and especially
+- **History-heavy** — many commits per entry (frequent `update()`s). `list()` and especially
   `history()` scale with total snapshots, and each snapshot is a round-trip. This is
   the one that degrades silently over time.
 
-`expire()` is the lever for **thick** — it collapses old snapshots, keeping only
+`expire()` is the lever for **history-heavy** catalogs — it collapses old snapshots, keeping only
 current HEADs, and returns reads to baseline. Run it on a schedule for any
 update-heavy catalog:
 
