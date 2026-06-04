@@ -1,9 +1,17 @@
 [project]
 name = "basal"
 version = "0.0.1"
-description = "icechunk catalog"
+description = "Icechunk-backed catalog for managing large collections of datasets"
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "CarbonPlan" }]
+
+[project.urls]
+Homepage = "https://github.com/norlandrhagen/basal"
+Repository = "https://github.com/norlandrhagen/basal"
+Documentation = "https://norlandrhagen.github.io/basal"
+
 dependencies = [
     "icechunk>=2.0.3",
     "obstore>=0.9.4",
@@ -17,9 +25,6 @@ search = ["fastembed>=0.2.0", "duckdb>=1.5.2", "arro3-core>=0.1.0"]
 stac = [
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.20.0",
-]
-docs = [
-    "markdown-exec>=1.12.1",
 ]
 
 [build-system]
