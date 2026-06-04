@@ -1,7 +1,7 @@
 [project]
 name = "basal"
 version = "0.0.1"
-description = "Icechunk-backed catalog for managing large collections of datasets"
+description = "Icechunk-backed prototype catalog"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
