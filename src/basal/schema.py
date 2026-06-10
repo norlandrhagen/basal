@@ -43,11 +43,21 @@ def validate(metadata: dict) -> None:
         )
     if "bbox" in metadata:
         _validate_bbox(metadata["bbox"])
-        if "geometry" not in metadata:
-            metadata["geometry"] = _bbox_to_geometry(metadata["bbox"])
     for field in ("start_datetime", "end_datetime"):
         if field in metadata:
             _validate_datetime_str(metadata[field], field)
+
+
+def finalize(metadata: dict) -> dict:
+    """Validate and return a copy with derived fields added (geometry from bbox).
+
+    ``validate`` itself never mutates its input — derivation happens only here.
+    """
+    validate(metadata)
+    out = dict(metadata)
+    if "bbox" in out and "geometry" not in out:
+        out["geometry"] = _bbox_to_geometry(out["bbox"])
+    return out
 
 
 def _validate_bbox(bbox: object) -> None:

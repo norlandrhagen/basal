@@ -29,14 +29,14 @@ s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/  ← dataset entry
 ## Install
 
 ```
-uv add "git+https://github.com/norlandrhagen/basal"
+uv add "basal @ git+https://github.com/norlandrhagen/basal"
 ```
 
-Optional extras:
+Optional extras (basal is not on PyPI, so extras need the git URL too):
 
 ```
-uv add "basal[search]"   # DuckDB SQL + similarity search
-uv add "basal[stac]"   # STAC API server
+uv add "basal[search] @ git+https://github.com/norlandrhagen/basal"   # DuckDB SQL + similarity search
+uv add "basal[stac] @ git+https://github.com/norlandrhagen/basal"     # STAC API server
 ```
 
 ## Public catalog

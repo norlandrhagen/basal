@@ -14,6 +14,13 @@ catalog_storage = icechunk.s3_storage(
 catalog = Catalog.open_or_create(catalog_storage)
 ```
 
+For consumers of a shared catalog, open read-only — any mutating method then
+raises `PermissionError`:
+
+```python
+catalog = Catalog.open(catalog_storage, readonly=True)
+```
+
 ## List entries
 
 ```python
@@ -142,6 +149,9 @@ Default deregister keeps the branch and commit history. Use `purge=True` only fo
 
 ```python
 catalog.update("noaa-gfs-analysis", doi="10.5281/zenodo.12345")
+
+# Delete metadata keys outright — merging alone can never remove one
+catalog.update("noaa-gfs-analysis", remove_fields=["doi"])
 
 # Re-inspect the live store, refresh CF attrs + snapshot anchor
 catalog.update_from_store("noaa-gfs-analysis")
@@ -379,7 +389,7 @@ stac["collection"]  # STAC Collection dict
 stac["items"]       # list of STAC Item dicts
 ```
 
-Entries without `bbox` are skipped with a warning. `geometry` (GeoJSON Polygon) is auto-derived from `bbox`.
+Entries without `bbox` are exported with null geometry (valid per STAC for non-spatial datasets). `geometry` (GeoJSON Polygon) is auto-derived from `bbox`. The export uses the same conversion as the STAC API server, so the two never drift.
 
 ### STAC API server
 

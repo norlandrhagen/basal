@@ -253,3 +253,86 @@ def test_values_with_unhashable(catalog, fake_store):
     assert {"t": 3} in vals
     assert {"t": 5} in vals
     assert len(vals) == 2
+
+
+# --- update remove_fields ---
+
+
+def test_update_remove_fields(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, owner="org", extra="scratch")
+    catalog.update("sst", remove_fields=["extra"])
+    assert "extra" not in catalog.get("sst").metadata
+
+
+def test_update_cannot_remove_required(catalog, fake_store):
+    catalog.register("sst", storage=fake_store, owner="org")
+    with pytest.raises(ValueError, match="Missing required fields"):
+        catalog.update("sst", remove_fields=["location"])
+
+
+# --- readonly catalog ---
+
+
+def test_readonly_catalog_blocks_mutations(tmp_path, fake_store):
+    storage_path = str(tmp_path / "ro-catalog")
+    Catalog.create(icechunk.local_filesystem_storage(storage_path)).register(
+        "sst", storage=fake_store, owner="org"
+    )
+    ro = Catalog.open(icechunk.local_filesystem_storage(storage_path), readonly=True)
+    assert ro.get("sst").owner == "org"
+    with pytest.raises(PermissionError, match="readonly"):
+        ro.register("new", storage=fake_store)
+    with pytest.raises(PermissionError, match="readonly"):
+        ro.update("sst", title="x")
+    with pytest.raises(PermissionError, match="readonly"):
+        ro.deregister("sst")
+
+
+# --- get missing entry ---
+
+
+def test_get_missing_entry_raises_keyerror(catalog):
+    with pytest.raises(KeyError, match="No entry named"):
+        catalog.get("does-not-exist")
+
+
+# --- validate does not mutate ---
+
+
+def test_validate_does_not_mutate_input():
+    from basal.schema import finalize, validate
+
+    meta = {"location": "s3://b/p", "format": "zarr", "bbox": [0.0, 0.0, 1.0, 1.0]}
+    before = dict(meta)
+    validate(meta)
+    assert meta == before
+    finalized = finalize(meta)
+    assert meta == before
+    assert "geometry" in finalized
+
+
+# --- to_stac matches API server conversion ---
+
+
+def test_to_stac_includes_entries_without_bbox(catalog, fake_store):
+    catalog.register("no-bbox", storage=fake_store, owner="org")
+    catalog.register(
+        "with-bbox", storage=fake_store, owner="org", bbox=[0.0, 0.0, 10.0, 10.0]
+    )
+    result = catalog.to_stac()
+    by_id = {i["id"]: i for i in result["items"]}
+    assert by_id["no-bbox"]["geometry"] is None
+    assert by_id["no-bbox"]["bbox"] is None
+    assert by_id["with-bbox"]["bbox"] == [0.0, 0.0, 10.0, 10.0]
+    assert result["collection"]["extent"]["spatial"]["bbox"] == [[0.0, 0.0, 10.0, 10.0]]
+
+
+# --- filter: touching bboxes count as overlap ---
+
+
+def test_filter_bbox_touching_edge_included(catalog, fake_store):
+    catalog.register(
+        "touch", storage=fake_store, owner="org", bbox=[0.0, 0.0, 10.0, 10.0]
+    )
+    names = {e.name for e in catalog.filter(bbox=(10.0, 0.0, 20.0, 10.0))}
+    assert "touch" in names

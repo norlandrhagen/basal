@@ -22,13 +22,12 @@ Requires basal[stac]: uv add "basal[stac]"
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from .stac import STAC_VERSION, bbox_overlaps, entry_to_stac_item, union_bbox
 
 if TYPE_CHECKING:
     from .catalog import Catalog
-    from .entry import Entry
-
-STAC_VERSION = "1.0.0"
 
 CONFORMANCE_CLASSES = [
     "https://api.stacspec.org/v1.0.0/core",
@@ -38,88 +37,6 @@ CONFORMANCE_CLASSES = [
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/oas30",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
 ]
-
-
-def _entry_to_stac_item(
-    entry: Entry,
-    collection_id: str | None = None,
-) -> dict[str, Any]:
-    """Convert any catalog Entry to a STAC Item dict.
-
-    Entries without bbox get null geometry, which is valid per STAC spec
-    for non-spatial datasets. Pass ``collection_id`` to include self/collection
-    links so STAC browsers can navigate correctly.
-    """
-    from .schema import _bbox_to_geometry
-
-    bbox = entry.metadata.get("bbox")
-    geometry = entry.metadata.get("geometry") or (
-        _bbox_to_geometry(bbox) if bbox else None
-    )
-
-    start_dt = entry.metadata.get("start_datetime")
-    end_dt = entry.metadata.get("end_datetime")
-    stac_datetime = None if (start_dt and end_dt) else (start_dt or None)
-
-    properties: dict[str, Any] = {"datetime": stac_datetime}
-    if start_dt:
-        properties["start_datetime"] = start_dt
-    if end_dt:
-        properties["end_datetime"] = end_dt
-    for field in ("title", "license"):
-        if field in entry.metadata:
-            properties[field] = entry.metadata[field]
-    if "tags" in entry.metadata:
-        properties["keywords"] = entry.metadata["tags"]
-    if "owner" in entry.metadata:
-        properties["providers"] = [{"name": entry.owner, "roles": ["producer"]}]
-    if "doi" in entry.metadata:
-        properties["sci:doi"] = entry.metadata["doi"]
-
-    links: list[dict] = [{"rel": "root", "href": "/", "type": "application/json"}]
-    if collection_id:
-        links += [
-            {
-                "rel": "self",
-                "href": f"/collections/{collection_id}/items/{entry.name}",
-                "type": "application/geo+json",
-            },
-            {
-                "rel": "collection",
-                "href": f"/collections/{collection_id}",
-                "type": "application/json",
-            },
-        ]
-    if "doi" in entry.metadata:
-        links.append(
-            {"rel": "cite-as", "href": f"https://doi.org/{entry.metadata['doi']}"}
-        )
-
-    return {
-        "type": "Feature",
-        "stac_version": STAC_VERSION,
-        "stac_extensions": [],
-        "id": entry.name,
-        "collection": collection_id,
-        "geometry": geometry,
-        "bbox": list(bbox) if bbox else None,
-        "properties": properties,
-        "links": links,
-        "assets": {
-            "data": {
-                "href": entry.location,
-                "type": "application/vnd+zarr",
-                "roles": ["data"],
-                "title": entry.metadata.get("title", entry.name),
-            }
-        },
-    }
-
-
-def _bbox_overlaps(entry_bbox: list[float], query_bbox: list[float]) -> bool:
-    ew, es, ee, en = entry_bbox
-    w, s, e, n = query_bbox
-    return ee >= w and ew <= e and en >= s and es <= n
 
 
 def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
@@ -152,20 +69,9 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
     # --- helpers ---
 
     def _all_items() -> list[dict]:
-        return [_entry_to_stac_item(e, collection_id) for e in catalog.list()]
+        return [entry_to_stac_item(e, collection_id) for e in catalog.list()]
 
     def _collection_extent(items: list[dict]) -> dict:
-        bboxes = [i["bbox"] for i in items if i["bbox"] is not None]
-        if bboxes:
-            union_bbox: list[float] = [
-                min(b[0] for b in bboxes),
-                min(b[1] for b in bboxes),
-                max(b[2] for b in bboxes),
-                max(b[3] for b in bboxes),
-            ]
-        else:
-            union_bbox = [-180.0, -90.0, 180.0, 90.0]
-
         starts = [
             p["start_datetime"]
             for i in items
@@ -180,7 +86,7 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
         t_end = max(ends) if ends else None
 
         return {
-            "spatial": {"bbox": [union_bbox]},
+            "spatial": {"bbox": [union_bbox(items)]},
             "temporal": {"interval": [[t_start, t_end]]},
         }
 
@@ -217,7 +123,7 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
             raise HTTPException(
                 status_code=404, detail=f"Item '{item_id}' not found"
             ) from err
-        return _entry_to_stac_item(entry, collection_id)
+        return entry_to_stac_item(entry, collection_id)
 
     def _search_response(features: list[dict]) -> dict:
         return {
@@ -324,13 +230,15 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
             "links": links,
         }
 
-    @app.get("/collections/{cid}/items/{item_id}")
+    # ``:path`` converter — entry names may contain '/' (allowed by _NAME_RE),
+    # which a plain path parameter would not match.
+    @app.get("/collections/{cid}/items/{item_id:path}")
     def item(cid: str, item_id: str):
         if cid != collection_id:
             _not_found_collection(cid)
         return _get_item(item_id)
 
-    @app.get("/items/{item_id}")
+    @app.get("/items/{item_id:path}")
     def item_root(item_id: str):
         """Root-level item endpoint — STAC browsers navigate here from item links."""
         return _get_item(item_id)
@@ -352,7 +260,7 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
                 e
                 for e in entries
                 if e.metadata.get("bbox") is not None
-                and _bbox_overlaps(e.metadata["bbox"], bbox)
+                and bbox_overlaps(e.metadata["bbox"], bbox)
             ]
 
         if datetime_str is not None:
@@ -366,7 +274,7 @@ def create_app(catalog: Catalog, collection_id: str = "basal-catalog"):
                 if e.name in name_set
             ]
 
-        return [_entry_to_stac_item(e, collection_id) for e in entries[:limit]]
+        return [entry_to_stac_item(e, collection_id) for e in entries[:limit]]
 
     @app.get("/search")
     def search_get(

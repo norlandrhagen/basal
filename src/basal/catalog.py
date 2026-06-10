@@ -11,15 +11,10 @@ import icechunk
 
 from .entry import Entry
 from .history import EVENT_KEY, collect_history
-from .schema import validate
+from .schema import finalize
 
 if TYPE_CHECKING:
     from .storage import StorageSpec
-
-warnings.filterwarnings(
-    "ignore",
-    message=".*Numcodecs codecs are not in the Zarr version 3 specification.*",
-)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 
@@ -102,13 +97,19 @@ def _derive_time_extent(
     """
     import xarray as xr
 
-    from .inspect import _TIME_NAMES, _find_coord, _np_dt_to_iso
+    from .inspect import (
+        _TIME_NAMES,
+        _find_coord,
+        _np_dt_to_iso,
+        suppress_numcodecs_warning,
+    )
 
     kwargs: dict = {"config": config} if config is not None else {}
     repo = icechunk.Repository.open(storage, **kwargs)
     derived: dict = {"dataset_snapshot_id": repo.lookup_branch(branch)}
     session = repo.readonly_session(branch=branch)
-    ds = xr.open_zarr(session.store, consolidated=False)
+    with suppress_numcodecs_warning():
+        ds = xr.open_zarr(session.store, consolidated=False)
     time_da = _find_coord(ds, "time", _TIME_NAMES)
     if time_da is not None and time_da.size > 0:
         new_end = _np_dt_to_iso(time_da.values.max())
@@ -125,8 +126,9 @@ class Catalog:
     single atomic fetch of all entries.
     """
 
-    def __init__(self, repo: icechunk.Repository) -> None:
+    def __init__(self, repo: icechunk.Repository, readonly: bool = False) -> None:
         self._repo = repo
+        self._readonly = readonly
 
     @classmethod
     def create(cls, storage: icechunk.Storage) -> Catalog:
@@ -136,17 +138,30 @@ class Catalog:
         return cls(repo)
 
     @classmethod
-    def open(cls, storage: icechunk.Storage) -> Catalog:
+    def open(cls, storage: icechunk.Storage, readonly: bool = False) -> Catalog:
         repo = icechunk.Repository.open(storage)
-        return cls(repo)
+        return cls(repo, readonly=readonly)
 
     @classmethod
     def open_or_create(cls, storage: icechunk.Storage) -> Catalog:
         if icechunk.Repository.exists(storage):
             return cls.open(storage)
-        return cls.create(storage)
+        try:
+            return cls.create(storage)
+        except icechunk.IcechunkError:
+            # Concurrent creator won the race between exists() and create().
+            if icechunk.Repository.exists(storage):
+                return cls.open(storage)
+            raise
 
     # --- mutations ---
+
+    def _check_writable(self) -> None:
+        if self._readonly:
+            raise PermissionError(
+                "Catalog was opened with readonly=True — mutations are disabled. "
+                "Reopen with Catalog.open(storage) to write."
+            )
 
     def register(
         self,
@@ -204,6 +219,10 @@ class Catalog:
         )
 
         _validate_name(name)
+        self._check_writable()
+        # Check name availability before the (expensive) store inspection so
+        # register_or_update's update path doesn't pay for a discarded inspect.
+        existing = self._assert_unregistered(name)
 
         # icechunk.Storage has no serialization API, so a catalog entry persists a
         # serializable storage_config to reopen the dataset later. A StorageSpec yields
@@ -255,8 +274,8 @@ class Catalog:
             entry_meta["virtual_chunk_containers_config"] = (
                 virtual_chunk_containers_config
             )
-        validate(entry_meta)
-        self._commit_entry(name, entry_meta)
+        entry_meta = finalize(entry_meta)
+        self._commit_entry(name, entry_meta, existing=existing)
 
     def register_zarr(
         self,
@@ -300,6 +319,8 @@ class Catalog:
         from .inspect import inspect_zarr_store, stable_attrs
 
         _validate_name(name)
+        self._check_writable()
+        existing = self._assert_unregistered(name)
 
         if inspect:
             info = inspect_zarr_store(
@@ -317,23 +338,41 @@ class Catalog:
         }
         if store_config:
             entry_meta["store_config"] = store_config
-        validate(entry_meta)
-        self._commit_entry(name, entry_meta)
+        entry_meta = finalize(entry_meta)
+        self._commit_entry(name, entry_meta, existing=existing)
 
-    def _commit_entry(self, name: str, entry_meta: dict[str, Any]) -> None:
-        """Create the entry branch (or reuse a deregistered one) and commit metadata.
+    def _assert_unregistered(self, name: str) -> bool:
+        """Raise if ``name`` is actively registered; return whether its branch exists.
 
-        Raises if the branch exists and is not deregistered. A deregistered branch is
-        reused, so re-registering that name succeeds and clears the deregistered marker.
+        A deregistered branch is reusable — returns True so the caller commits onto
+        it instead of creating a new branch.
         """
         existing = name in self._repo.list_branches()
         if existing and not self._head_metadata(name).get(DELETED_KEY):
             raise ValueError(
                 f"Dataset '{name}' already registered. Use deregister first."
             )
+        return existing
+
+    def _commit_entry(
+        self, name: str, entry_meta: dict[str, Any], existing: bool | None = None
+    ) -> None:
+        """Create the entry branch (or reuse a deregistered one) and commit metadata.
+
+        Raises if the branch exists and is not deregistered. A deregistered branch is
+        reused, so re-registering that name succeeds and clears the deregistered marker.
+        """
+        if existing is None:
+            existing = self._assert_unregistered(name)
         if not existing:
             main_snap = self._repo.lookup_branch("main")
-            self._repo.create_branch(name, main_snap)
+            try:
+                self._repo.create_branch(name, main_snap)
+            except icechunk.IcechunkError as err:
+                raise ValueError(
+                    f"Dataset '{name}' already registered (created concurrently). "
+                    "Use deregister first."
+                ) from err
         session = self._repo.writable_session(name)
         session.commit(
             f"register {name}",
@@ -377,11 +416,24 @@ class Catalog:
                 return "updated"
             raise
 
-    def update(self, name: str, **fields: Any) -> None:
-        """Merge ``fields`` into the current metadata (new values win)."""
+    def update(
+        self,
+        name: str,
+        remove_fields: list[str] | tuple[str, ...] | None = None,
+        **fields: Any,
+    ) -> None:
+        """Merge ``fields`` into the current metadata (new values win).
+
+        Pass ``remove_fields=["key", ...]`` to delete metadata keys outright —
+        plain merging can never remove a key. Required fields (location, format)
+        cannot be removed; validation rejects the result.
+        """
+        self._check_writable()
         entry = self.get(name)
         merged = {**entry.metadata, **fields}
-        validate(merged)
+        for key in remove_fields or ():
+            merged.pop(key, None)
+        merged = finalize(merged)
 
         session = self._repo.writable_session(name)
         session.commit(
@@ -422,7 +474,10 @@ class Catalog:
             )
         else:
             derived = _derive_metadata_from_store(
-                resolved, branch=branch, config=config, derive_extent=derive_extent
+                resolved,
+                branch=branch,
+                config=entry._resolve_repo_config(config),
+                derive_extent=derive_extent,
             )
         updates = {**derived, **fields}
         before = entry.metadata
@@ -441,6 +496,7 @@ class Catalog:
         (the equivalent of ``git branch -D``). Reserve it for compliance erasure or
         throwaway test entries.
         """
+        self._check_writable()
         if purge:
             self._repo.delete_branch(name)
             return
@@ -455,6 +511,7 @@ class Catalog:
 
     def restore(self, name: str) -> None:
         """Clear the deregistered marker, committing the entry back into the catalog."""
+        self._check_writable()
         entry = self.get(name, include_deleted=True)
         if not self._head_metadata(name).get(DELETED_KEY):
             return
@@ -473,7 +530,10 @@ class Catalog:
         return self._repo.lookup_snapshot(snapshot_id).metadata or {}
 
     def get(self, name: str, include_deleted: bool = False) -> Entry:
-        snapshot_id = self._repo.lookup_branch(name)
+        try:
+            snapshot_id = self._repo.lookup_branch(name)
+        except icechunk.IcechunkError as err:
+            raise KeyError(f"No entry named {name!r} in catalog") from err
         info = self._repo.lookup_snapshot(snapshot_id)
         meta = info.metadata or {}
         if meta.get(DELETED_KEY) and not include_deleted:
@@ -695,13 +755,13 @@ class Catalog:
                     continue
 
             if do_spatial:
+                from .stac import bbox_overlaps
+
                 e_bbox = entry.metadata.get("bbox")
                 if e_bbox is None:
                     spatial_missing.append(entry.name)
                     continue
-                ew, es, ee, en = e_bbox
-                fw, fs, fe, fn = bbox
-                if ee <= fw or ew >= fe or en <= fs or es >= fn:
+                if not bbox_overlaps(list(e_bbox), list(bbox)):
                     continue
 
             results.append(entry)
@@ -790,6 +850,7 @@ class Catalog:
 
         Returns the set of expired snapshot ids.
         """
+        self._check_writable()
         expired = self._repo.expire_snapshots(older_than=older_than)
         if garbage_collect:
             self._repo.garbage_collect(older_than)
@@ -800,9 +861,9 @@ class Catalog:
     def to_stac(self, collection_id: str = "basal-catalog") -> dict:
         """Export catalog as a STAC Collection with Items.
 
-        Only entries with bbox are exported as valid STAC Items — entries
-        missing bbox are skipped with a warning. geometry is auto-derived
-        from bbox (set automatically by register/update when bbox is present).
+        Uses the same entry -> Item conversion as the STAC API server
+        (``basal.stac.entry_to_stac_item``). Entries without bbox get null
+        geometry — valid per STAC spec for non-spatial datasets.
 
         Returns a dict with:
           - "collection": STAC Collection object
@@ -810,102 +871,18 @@ class Catalog:
 
         Full STAC spec: https://github.com/radiantearth/stac-spec/
         """
-        items = []
-        skipped = []
+        from .stac import STAC_VERSION, entry_to_stac_item, union_bbox
 
-        for entry in self.list():
-            bbox = entry.metadata.get("bbox")
-            if bbox is None:
-                skipped.append(entry.name)
-                continue
-
-            geometry = entry.metadata.get("geometry")
-            if geometry is None:
-                from .schema import _bbox_to_geometry
-
-                geometry = _bbox_to_geometry(bbox)
-
-            start_dt = entry.metadata.get("start_datetime")
-            end_dt = entry.metadata.get("end_datetime")
-            # STAC: datetime must be set; use null + start/end when range given
-            if start_dt and end_dt:
-                stac_datetime = None
-            elif start_dt:
-                stac_datetime = start_dt
-            else:
-                stac_datetime = None
-
-            properties: dict = {"datetime": stac_datetime}
-            if start_dt:
-                properties["start_datetime"] = start_dt
-            if end_dt:
-                properties["end_datetime"] = end_dt
-            for field in ("title", "license"):
-                if field in entry.metadata:
-                    properties[field] = entry.metadata[field]
-            if "tags" in entry.metadata:
-                properties["keywords"] = entry.metadata["tags"]
-            if "owner" in entry.metadata:
-                properties["providers"] = [{"name": entry.owner, "roles": ["producer"]}]
-            if "doi" in entry.metadata:
-                properties["sci:doi"] = entry.metadata["doi"]
-
-            links = []
-            if "doi" in entry.metadata:
-                links.append(
-                    {
-                        "rel": "cite-as",
-                        "href": f"https://doi.org/{entry.metadata['doi']}",
-                    }
-                )
-
-            item = {
-                "type": "Feature",
-                "stac_version": "1.0.0",
-                "id": entry.name,
-                "geometry": geometry,
-                "bbox": list(bbox),
-                "properties": properties,
-                "links": links,
-                "assets": {
-                    "data": {
-                        "href": entry.location,
-                        "type": "application/vnd+zarr",
-                        "roles": ["data"],
-                        "title": entry.metadata.get("title", entry.name),
-                    }
-                },
-            }
-            items.append(item)
-
-        if skipped:
-            warnings.warn(
-                f"{len(skipped)} entr{'y' if len(skipped) == 1 else 'ies'} "
-                f"skipped — no bbox (required for STAC): {skipped}. "
-                "Add with: catalog.update(name, bbox=[west, south, east, north])",
-                stacklevel=2,
-            )
-
-        # Compute collection-level bbox as union of all item bboxes
-        if items:
-            all_bboxes = [i["bbox"] for i in items]
-            union_bbox = [
-                min(b[0] for b in all_bboxes),
-                min(b[1] for b in all_bboxes),
-                max(b[2] for b in all_bboxes),
-                max(b[3] for b in all_bboxes),
-            ]
-        else:
-            union_bbox = [-180.0, -90.0, 180.0, 90.0]
+        items = [entry_to_stac_item(e, collection_id) for e in self.list()]
 
         collection = {
             "type": "Collection",
             "id": collection_id,
-            "stac_version": "1.0.0",
+            "stac_version": STAC_VERSION,
             "description": "Icechunk dataset catalog exported from basal",
             "links": [],
             "extent": {
-                "spatial": {"bbox": [union_bbox]},
+                "spatial": {"bbox": [union_bbox(items)]},
                 "temporal": {"interval": [[None, None]]},
             },
             "license": "various",
@@ -1012,8 +989,8 @@ class Catalog:
         Console().print(table)
 
     def __repr__(self) -> str:
-        n = len([b for b in self._repo.list_branches() if b != "main"])
-        return f"<Catalog with {n} entries>"
+        # Count via list() so deregistered/locationless branches don't inflate it.
+        return f"<Catalog with {len(self.list())} entries>"
 
     def _repr_html_(self) -> str:
         entries = sorted(self.list(), key=lambda e: e.name)

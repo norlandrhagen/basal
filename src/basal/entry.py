@@ -176,12 +176,17 @@ class Entry:
     ):
         import xarray as xr
 
+        from .inspect import suppress_numcodecs_warning
+
         if self.format == "zarr":
             from .zarr_store import build_zarr_store
 
             store_config = self.metadata.get("store_config")
             zarr_store = build_zarr_store(self.location, store_config)
-            return xr.open_zarr(zarr_store, consolidated=False, **(open_kwargs or {}))
+            with suppress_numcodecs_warning():
+                return xr.open_zarr(
+                    zarr_store, consolidated=False, **(open_kwargs or {})
+                )
 
         session = self.open_session(
             branch=branch,
@@ -191,7 +196,10 @@ class Entry:
             config=config,
             authorize_virtual_chunk_access=authorize_virtual_chunk_access,
         )
-        return xr.open_zarr(session.store, consolidated=False, **(open_kwargs or {}))
+        with suppress_numcodecs_warning():
+            return xr.open_zarr(
+                session.store, consolidated=False, **(open_kwargs or {})
+            )
 
     def is_stale(
         self,

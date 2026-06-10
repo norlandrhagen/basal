@@ -176,14 +176,16 @@ def similar(
     con = duckdb.connect()
     con.register("emb", tbl)
 
-    query_vec_sql = f"[{', '.join(str(float(x)) for x in query_vec)}]::FLOAT[{dim}]"
-    rows = con.execute(f"""
+    rows = con.execute(
+        f"""
         SELECT name,
-               array_cosine_similarity(embedding::FLOAT[{dim}], {query_vec_sql}) AS score
+               array_cosine_similarity(embedding::FLOAT[{dim}], ?::FLOAT[{dim}]) AS score
         FROM emb
         ORDER BY score DESC
-        LIMIT {top_k}
-    """).fetchall()
+        LIMIT ?
+    """,
+        [query_vec.tolist(), int(top_k)],
+    ).fetchall()
 
     entry_by_name = {e.name: e for e in entries}
     return [(entry_by_name[name], float(score)) for name, score in rows]
@@ -364,14 +366,16 @@ def similar_by_schema(
     )
     con2 = duckdb.connect()
     con2.register("emb", emb_tbl)
-    query_vec_sql = f"[{', '.join(str(float(x)) for x in query_vec)}]::FLOAT[{dim}]"
-    rows = con2.execute(f"""
+    rows = con2.execute(
+        f"""
         SELECT name,
-               array_cosine_similarity(embedding::FLOAT[{dim}], {query_vec_sql}) AS score
+               array_cosine_similarity(embedding::FLOAT[{dim}], ?::FLOAT[{dim}]) AS score
         FROM emb
         ORDER BY score DESC
-        LIMIT {top_k}
-    """).fetchall()
+        LIMIT ?
+    """,
+        [query_vec.tolist(), int(top_k)],
+    ).fetchall()
 
     entry_by_name = {e.name: e for e in entries}
     return [(entry_by_name[name], float(score)) for name, score in rows]

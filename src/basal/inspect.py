@@ -7,6 +7,8 @@ temporal extent — negligible IO for typical 1-D coordinate arrays.
 
 from __future__ import annotations
 
+import warnings
+from contextlib import contextmanager
 from typing import Any
 
 import icechunk
@@ -14,6 +16,21 @@ import icechunk
 _LAT_NAMES = {"lat", "latitude", "y", "ylat"}
 _LON_NAMES = {"lon", "longitude", "x", "xlon"}
 _TIME_NAMES = {"time", "t"}
+
+
+@contextmanager
+def suppress_numcodecs_warning():
+    """Silence the numcodecs zarr-v3 spec warning around xr.open_zarr calls.
+
+    Scoped per-call instead of a module-level filterwarnings so importing
+    basal does not mutate global warning state.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*Numcodecs codecs are not in the Zarr version 3 specification.*",
+        )
+        yield
 
 
 def _find_coord(ds: Any, standard_name: str, name_set: set[str]) -> Any:
@@ -116,7 +133,8 @@ def inspect_store(
     repo = icechunk.Repository.open(storage, **kwargs)
     session = repo.readonly_session(branch=branch)
 
-    ds = xr.open_zarr(session.store, consolidated=False)
+    with suppress_numcodecs_warning():
+        ds = xr.open_zarr(session.store, consolidated=False)
 
     result: dict[str, Any] = {}
 
@@ -171,7 +189,8 @@ def inspect_zarr_store(
     from .zarr_store import build_zarr_store
 
     store = build_zarr_store(location, store_config)
-    ds = xr.open_zarr(store, consolidated=False)
+    with suppress_numcodecs_warning():
+        ds = xr.open_zarr(store, consolidated=False)
 
     result: dict[str, Any] = {}
     result["global_attrs"] = dict(ds.attrs)
