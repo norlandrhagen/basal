@@ -17,7 +17,11 @@ from basal.history import EVENT_KEY
 from basal.storage import (
     _repo_config_from_virtual_chunks,
     _virtual_chunk_container_to_config,
+    _virtual_chunk_credentials_from_config,
+    http_storage,
     local_filesystem_storage,
+    location_from_config,
+    redirect_storage,
     s3_storage,
     storage_from_config,
 )
@@ -240,6 +244,69 @@ def test_virtual_chunk_container_roundtrip():
     ]
     reconstructed = _repo_config_from_virtual_chunks(serialized)
     assert "s3://my-bucket/" in reconstructed.virtual_chunk_containers
+
+
+@pytest.mark.parametrize(
+    "url_prefix,store_cfg",
+    [
+        ("https://example.com/data/", icechunk.ObjectStoreConfig.Http(None)),
+        ("http://example.com/data/", icechunk.ObjectStoreConfig.Http(None)),
+        ("gs://my-bucket/data/", icechunk.ObjectStoreConfig.Gcs(None)),
+    ],
+)
+def test_virtual_chunk_container_roundtrip_http_gcs(url_prefix, store_cfg):
+    config = icechunk.RepositoryConfig.default()
+    config.set_virtual_chunk_container(
+        icechunk.VirtualChunkContainer(url_prefix, store=store_cfg)
+    )
+    serialized = [
+        _virtual_chunk_container_to_config(vc)
+        for vc in config.virtual_chunk_containers.values()
+    ]
+    assert serialized == [{"url_prefix": url_prefix}]
+    reconstructed = _repo_config_from_virtual_chunks(serialized)
+    assert url_prefix in reconstructed.virtual_chunk_containers
+
+
+@pytest.mark.parametrize(
+    "containers",
+    [
+        [{"url_prefix": "https://example.com/data/"}],
+        [{"url_prefix": "gs://my-bucket/data/"}],
+        [{"url_prefix": "gs://my-bucket/data/", "anonymous": True}],
+    ],
+)
+def test_virtual_chunk_credentials_http_gcs(containers):
+    creds = _virtual_chunk_credentials_from_config(containers)
+    assert creds is not None
+
+
+# --- storage_from_config http / redirect ---
+
+
+def test_storage_from_config_http():
+    storage = storage_from_config(
+        {"type": "http", "base_url": "https://example.com/catalog"}
+    )
+    assert isinstance(storage, icechunk.Storage)
+
+
+def test_storage_from_config_redirect():
+    storage = storage_from_config(
+        {"type": "redirect", "base_url": "https://example.com/catalog"}
+    )
+    assert isinstance(storage, icechunk.Storage)
+
+
+def test_http_redirect_spec_roundtrip():
+    for spec, expected_type in [
+        (http_storage(base_url="https://example.com/c"), "http"),
+        (redirect_storage(base_url="https://example.com/c"), "redirect"),
+    ]:
+        config = spec.to_config()
+        assert config == {"type": expected_type, "base_url": "https://example.com/c"}
+        assert location_from_config(config) == "https://example.com/c"
+        assert isinstance(storage_from_config(config), icechunk.Storage)
 
 
 # --- values() handles unhashable values ---

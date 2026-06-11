@@ -21,6 +21,23 @@ raises `PermissionError`:
 catalog = Catalog.open(catalog_storage, readonly=True)
 ```
 
+### Open over HTTP (no cloud credentials)
+
+A catalog served over plain HTTP — e.g. a public S3 bucket or a CDN — can be
+opened read-only with no AWS credentials at all:
+
+```python
+catalog = Catalog.open(
+    icechunk.http_storage(
+        base_url="https://carbonplan-share.s3.us-west-2.amazonaws.com/basal/public_icechunk_stores"
+    ),
+    readonly=True,
+)
+```
+
+`icechunk.redirect_storage(base_url=...)` works the same way for endpoints that
+302-redirect to object storage.
+
 ## List entries
 
 ```python
@@ -124,6 +141,9 @@ catalog.register(
 )
 ```
 
+Container prefixes with `s3://`, `gs://`, `http://`, and `https://` schemes all
+serialize and reconstruct automatically.
+
 For non-anonymous credentials at read time:
 
 ```python
@@ -132,6 +152,12 @@ credentials = icechunk.containers_credentials(
 )
 ds = entry.to_xarray(authorize_virtual_chunk_access=credentials)
 ```
+
+!!! note
+    `gs://` containers reconstruct with from-env credentials by default — the
+    anonymous flag is not captured in the serialized config. For anonymous GCS
+    reads, pass credentials explicitly:
+    `authorize_virtual_chunk_access=icechunk.containers_credentials({"gs://bucket/": icechunk.gcs_credentials(anonymous=True)})`
 
 ## Deregister and restore
 
@@ -150,7 +176,8 @@ Default deregister keeps the branch and commit history. Use `purge=True` only fo
 ```python
 catalog.update("noaa-gfs-analysis", doi="10.5281/zenodo.12345")
 
-# Delete metadata keys outright — merging alone can never remove one
+# Delete metadata keys outright — merging alone can never remove one.
+# Required fields (name, location, ...) cannot be removed — raises ValueError.
 catalog.update("noaa-gfs-analysis", remove_fields=["doi"])
 
 # Re-inspect the live store, refresh CF attrs + snapshot anchor
@@ -247,6 +274,13 @@ entry.last_data_updated() # datetime of current HEAD snapshot
 
 stale = catalog.refresh() # {name: bool} across all entries
 ```
+
+!!! warning
+    `is_stale()` raises `NotImplementedError` for virtual stores (entries with
+    virtual chunk containers). It compares icechunk snapshots, but a virtual
+    store's source files (e.g. NetCDF on S3) can change without producing a new
+    snapshot, so the check would silently miss those changes. Check source file
+    modification times manually instead.
 
 ## History
 

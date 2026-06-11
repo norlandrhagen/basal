@@ -118,7 +118,16 @@ class Entry:
         )
         if resolved_creds is not None:
             kwargs["authorize_virtual_chunk_access"] = resolved_creds
-        return icechunk.Repository.open(resolved_storage, **kwargs)
+        try:
+            return icechunk.Repository.open(resolved_storage, **kwargs)
+        except icechunk.IcechunkError as e:
+            if "doesn't exist" in str(e):
+                raise FileNotFoundError(
+                    f"Dataset store for entry {self.name!r} not found at "
+                    f"{self.location!r}. The store may have been deleted or moved; "
+                    "deregister the entry or re-register with the new location."
+                ) from e
+            raise
 
     def open_repo(
         self,

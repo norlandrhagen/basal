@@ -184,6 +184,10 @@ def _virtual_chunk_container_to_config(vc: Any) -> dict:
         if opts.endpoint_url:
             result["endpoint_url"] = opts.endpoint_url
         return result
+    if scheme in ("http", "https", "gs"):
+        # Http/Gcs ObjectStoreConfigs carry only an opaque options dict;
+        # the url_prefix is sufficient to reconstruct them.
+        return {"url_prefix": url_prefix}
     raise NotImplementedError(
         f"Virtual chunk container scheme {scheme!r} not yet supported for "
         "serialization. Pass config= explicitly at read time."
@@ -201,6 +205,10 @@ def _object_store_config_from_virtual_chunk_dict(c: dict) -> icechunk.ObjectStor
             endpoint_url=c.get("endpoint_url"),
         )
         return icechunk.ObjectStoreConfig.S3(opts)
+    if scheme in ("http", "https"):
+        return icechunk.ObjectStoreConfig.Http(None)
+    if scheme == "gs":
+        return icechunk.ObjectStoreConfig.Gcs(None)
     raise NotImplementedError(
         f"Virtual chunk container scheme {scheme!r} not yet supported for "
         "automatic RepositoryConfig reconstruction. Pass config= explicitly."
@@ -244,7 +252,7 @@ def _virtual_chunk_credentials_from_config(
                 cred = icechunk.s3_from_env_credentials()
         elif scheme == "gs":
             if c.get("anonymous"):
-                cred = icechunk.gcs_anonymous_credentials()
+                cred = icechunk.gcs_credentials(anonymous=True)
             else:
                 cred = icechunk.gcs_from_env_credentials()
         elif scheme in ("http", "https"):

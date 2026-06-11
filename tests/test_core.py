@@ -575,3 +575,74 @@ def test_expire_collapses_history_keeps_entries(catalog, fake_store):
     assert entry.name == "sst"
     assert entry.metadata["rev"] == 7
     assert {e.name for e in catalog.list()} == {"sst"}
+
+
+# --- STAC export ---
+
+
+def test_to_stac_export(catalog, fake_store):
+    catalog.register(
+        "sst",
+        storage=fake_store,
+        location="s3://b/sst",
+        bbox=[-180, -90, 180, 90],
+    )
+    catalog.register("plain", storage=fake_store, location="s3://b/plain")
+
+    result = catalog.to_stac(collection_id="my-catalog")
+
+    collection = result["collection"]
+    assert collection["type"] == "Collection"
+    assert collection["id"] == "my-catalog"
+    assert collection["extent"]["spatial"]["bbox"] == [[-180, -90, 180, 90]]
+
+    items = result["items"]
+    assert {i["id"] for i in items} == {"sst", "plain"}
+    by_id = {i["id"]: i for i in items}
+    assert by_id["sst"]["bbox"] == [-180, -90, 180, 90]
+    assert by_id["plain"]["geometry"] is None  # non-spatial entries valid per spec
+    assert all(i["collection"] == "my-catalog" for i in items)
+
+
+# --- missing backing store ---
+
+
+def test_to_xarray_missing_store_clear_error(catalog, tmp_path):
+    import shutil
+
+    import xarray as xr
+
+    path = str(tmp_path / "doomed_dataset")
+    spec = st.local_filesystem_storage(path)
+    repo = icechunk.Repository.create(spec.build())
+    session = repo.writable_session("main")
+    xr.Dataset({"v": xr.DataArray([1.0], dims=["x"])}).to_zarr(
+        session.store, consolidated=False
+    )
+    session.commit("init")
+
+    catalog.register("doomed", storage=spec)
+    shutil.rmtree(path)
+
+    with pytest.raises(FileNotFoundError, match="deleted or moved"):
+        catalog.get("doomed").to_xarray()
+
+
+# --- concurrent registration ---
+
+
+def test_concurrent_register_different_names(fake_store):
+    # In-memory storage supports conditional updates (like object stores);
+    # local filesystem storage does not, so it can't back this test.
+    from concurrent.futures import ThreadPoolExecutor
+
+    cat = Catalog.create(icechunk.in_memory_storage())
+    names = [f"ds-{i}" for i in range(8)]
+
+    def _register(name):
+        cat.register(name, storage=fake_store, location=f"s3://b/{name}")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(_register, names))
+
+    assert {e.name for e in cat.list()} == set(names)

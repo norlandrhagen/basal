@@ -162,3 +162,38 @@ def test_validate_rejects_unknown_format(catalog, zarr_store):
 
     with pytest.raises(ValueError, match="Unsupported format"):
         validate({"location": "s3://bucket/path", "format": "netcdf"})
+
+
+# --- build_zarr_store cloud URI construction (no credentials needed) ---
+
+
+@pytest.mark.parametrize(
+    "location,config",
+    [
+        ("s3://my-bucket/path/to/store", {"skip_signature": True}),
+        ("gs://my-bucket/path/to/store", {"skip_signature": True}),
+        ("gcs://my-bucket/path/to/store", {"skip_signature": True}),
+        ("az://my-container/path/to/store", {"account_name": "myaccount"}),
+    ],
+)
+def test_build_zarr_store_cloud_schemes(location, config):
+    import zarr
+    from basal.zarr_store import build_zarr_store
+
+    store = build_zarr_store(location, config)
+    assert isinstance(store, zarr.storage.ObjectStore)
+    assert store.read_only
+
+
+def test_build_zarr_store_local_passthrough(tmp_path):
+    from basal.zarr_store import build_zarr_store
+
+    assert build_zarr_store(str(tmp_path)) == str(tmp_path)
+    assert build_zarr_store(f"file://{tmp_path}") == str(tmp_path)
+
+
+def test_build_zarr_store_unsupported_scheme():
+    from basal.zarr_store import build_zarr_store
+
+    with pytest.raises(ValueError, match="Unsupported URI scheme"):
+        build_zarr_store("ftp://host/store")
