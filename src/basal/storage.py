@@ -22,7 +22,15 @@ import icechunk
 # Serializable config keys understood by storage_from_config(), per storage type.
 # StorageSpec.to_config() emits only these (drops credential objects / unknown kwargs).
 _CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    "s3": ("bucket", "prefix", "region", "anonymous", "from_env", "endpoint_url"),
+    "s3": (
+        "bucket",
+        "prefix",
+        "region",
+        "anonymous",
+        "from_env",
+        "endpoint_url",
+        "force_path_style",
+    ),
     "gcs": ("bucket", "prefix", "anonymous", "from_env"),
     "local": ("path",),
     "http": ("base_url",),
@@ -145,6 +153,7 @@ def storage_from_config(config: dict) -> icechunk.Storage:
             anonymous=config.get("anonymous") or None,
             from_env=config.get("from_env") or None,
             endpoint_url=config.get("endpoint_url"),
+            force_path_style=config.get("force_path_style") or None,
         )
     if t == "gcs":
         return icechunk.gcs_storage(
