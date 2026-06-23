@@ -189,6 +189,19 @@ def test_storage_spec_to_config_s3():
     }
 
 
+def test_storage_spec_to_config_s3_force_path_style():
+    spec = s3_storage(
+        bucket="b",
+        prefix="p",
+        endpoint_url="https://nyu1.osn.mghpcc.org",
+        force_path_style=True,
+    )
+    cfg = spec.to_config()
+    assert cfg["force_path_style"] is True
+    assert cfg["endpoint_url"] == "https://nyu1.osn.mghpcc.org"
+    assert isinstance(storage_from_config(cfg), icechunk.Storage)
+
+
 def test_storage_spec_roundtrip_build(tmp_path):
     path = str(tmp_path / "store")
     spec = local_filesystem_storage(path)
