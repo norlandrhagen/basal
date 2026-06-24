@@ -8,7 +8,7 @@ A small, serverless data catalog **prototype** built on [Icechunk](https://icech
 
 ## Concept
 
-Earth science catalogs seem to fall into two categories: a managed centralized database or a local collection of files (STAC json, intake yaml, etc.). `basal` aims somewhere in the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage. By using a 'meta' Icechunk store as the catalog, we take advantage of the cloud-native optimistic concurrency.
+Earth science catalogs tend to be one of two things: a managed central database, or a local collection of files (STAC json, intake yaml, etc.). `basal` sits in the middle — shared catalog tracking without the overhead of running a database. Icechunk provides git-like transaction history and optimistic concurrency in cloud storage, which the catalog inherits by being itself an Icechunk store.
 
 Each dataset is registered as a branch whose HEAD snapshot carries that entry's metadata. A single read returns all entries in your catalog.
 
@@ -78,4 +78,4 @@ ds = entry.to_xarray()
 print(f'<div style="overflow-x:auto">{ds._repr_html_()}</div>')
 ```
 
-See [Usage](usage.md) for the full API.
+See [Getting started](usage.md), [Discover](discover.md), and [Managing entries](manage.md) for the full API.

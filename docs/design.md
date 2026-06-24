@@ -68,10 +68,9 @@ Earlier commits on an entry branch are its history: every `update()` /
 
 ## Scaling notes
 
-- Entry metadata is stored in snapshot commit metadata. A dataset with very
-  many variables produces a large metadata blob, and `list()` fetches every
-  entry's blob — keep stored per-variable attrs lean (basal stores only
-  units/long_name/standard_name per variable).
-- Unbounded update history slows `list()` over time. Run `expire()`
-  periodically after bulk `update_from_store()` cycles.
-- See the [Usage scaling section](usage.md#scaling) for measured numbers.
+Entry metadata lives in snapshot commit metadata, and `list()` fetches every
+entry's blob — so basal stores only `units`/`long_name`/`standard_name` per
+variable to keep that blob small. Update history accumulates snapshots that
+`list()` must traverse, which `expire()` collapses.
+
+See the [Scaling section](manage.md#scaling) for the read/write cost model.
