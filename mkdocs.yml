@@ -27,6 +27,9 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Usage: usage.md
+  - Getting started: usage.md
+  - Discover: discover.md
+  - Managing entries: manage.md
+  - STAC: stac.md
   - Design: design.md
   - Reference: reference.md

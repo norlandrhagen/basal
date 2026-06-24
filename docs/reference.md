@@ -42,3 +42,27 @@ Auto-derived at registration — no need to set manually:
 | `last_data_updated()` | ✓ HEAD snapshot timestamp | ✗ |
 | `open_repo()` / `open_session()` | ✓ | ✗ |
 
+## Opening modes
+
+`Catalog.open(storage, ...)` reaches the catalog repo; the `storage` argument
+selects how, and with what credentials. Add `readonly=True` for any consumer of a
+shared catalog (see [Getting started](usage.md#create-a-catalog)).
+
+**Default** — credentialed object storage via `icechunk.s3_storage(...)` /
+`icechunk.gcs_storage(...)`.
+
+**Over HTTP (no cloud credentials).** A catalog served over plain HTTP — e.g. a
+public S3 bucket or a CDN — can be opened read-only with no AWS credentials at all:
+
+```python
+catalog = Catalog.open(
+    icechunk.http_storage(
+        base_url="https://carbonplan-share.s3.us-west-2.amazonaws.com/basal/public_icechunk_stores"
+    ),
+    readonly=True,
+)
+```
+
+`icechunk.redirect_storage(base_url=...)` works the same way for endpoints that
+302-redirect to object storage.
+
