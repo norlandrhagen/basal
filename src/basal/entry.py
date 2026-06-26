@@ -36,6 +36,11 @@ class Entry:
         """URL prefixes of virtual chunk containers recorded at registration time."""
         return self.metadata.get("virtual_chunk_containers", [])
 
+    @property
+    def group(self) -> str | None:
+        """Nested zarr group path (DataTree node) recorded at registration time."""
+        return self.metadata.get("group")
+
     def _resolve_storage(
         self, storage: icechunk.Storage | None = None
     ) -> icechunk.Storage:
@@ -187,14 +192,61 @@ class Entry:
 
         from .inspect import suppress_numcodecs_warning
 
+        kwargs = dict(open_kwargs or {})
+        if "group" not in kwargs and self.group:
+            kwargs["group"] = self.group
+
         if self.format == "zarr":
             from .zarr_store import build_zarr_store
 
             store_config = self.metadata.get("store_config")
             zarr_store = build_zarr_store(self.location, store_config)
             with suppress_numcodecs_warning():
-                return xr.open_zarr(
-                    zarr_store, consolidated=False, **(open_kwargs or {})
+                return xr.open_zarr(zarr_store, consolidated=False, **kwargs)
+
+        session = self.open_session(
+            branch=branch,
+            tag=tag,
+            snapshot_id=snapshot_id,
+            storage=storage,
+            config=config,
+            authorize_virtual_chunk_access=authorize_virtual_chunk_access,
+        )
+        with suppress_numcodecs_warning():
+            return xr.open_zarr(session.store, consolidated=False, **kwargs)
+
+    def to_datatree(
+        self,
+        *,
+        branch: str | None = "main",
+        tag: str | None = None,
+        snapshot_id: str | None = None,
+        storage: icechunk.Storage | None = None,
+        config: icechunk.RepositoryConfig | None = None,
+        authorize_virtual_chunk_access: dict | None = None,
+        open_kwargs: dict[str, Any] | None = None,
+    ):
+        """Open this entry (or its ``group`` subtree) as an xarray.DataTree.
+
+        Use for entries that point at a hierarchy of nested zarr groups rather
+        than a single dataset. The stored ``group`` (if any) is the subtree root.
+        """
+        import xarray as xr
+
+        from .inspect import suppress_numcodecs_warning
+
+        kwargs = dict(open_kwargs or {})
+        if "group" not in kwargs and self.group:
+            kwargs["group"] = self.group
+
+        if self.format == "zarr":
+            from .zarr_store import build_zarr_store
+
+            store_config = self.metadata.get("store_config")
+            zarr_store = build_zarr_store(self.location, store_config)
+            with suppress_numcodecs_warning():
+                return xr.open_datatree(
+                    zarr_store, engine="zarr", consolidated=False, **kwargs
                 )
 
         session = self.open_session(
@@ -206,8 +258,8 @@ class Entry:
             authorize_virtual_chunk_access=authorize_virtual_chunk_access,
         )
         with suppress_numcodecs_warning():
-            return xr.open_zarr(
-                session.store, consolidated=False, **(open_kwargs or {})
+            return xr.open_datatree(
+                session.store, engine="zarr", consolidated=False, **kwargs
             )
 
     def is_stale(

@@ -22,6 +22,40 @@ info = entry.inspect()
 # {'dataset_snapshot_id': '...', 'global_attrs': {...}, 'dims': {...}, 'variables': {...}}
 ```
 
+## Open data
+
+### Single dataset
+
+```python
+entry = catalog.get("noaa-gfs-analysis")
+ds = entry.to_xarray()
+```
+
+For entries with a stored `group` (e.g. registered with `group=` or via
+`register_datatree()`), `to_xarray()` opens exactly that node automatically —
+no `group=` needed at call time.
+
+### DataTree
+
+`to_datatree()` opens the entry's subtree as an `xr.DataTree`. If the entry has a
+stored `group`, that node becomes the root:
+
+```python
+entry = catalog.get("cmip6/ACCESS-CM2/ssp245")
+dt = entry.to_datatree()
+```
+
+To open the entire store as a DataTree from a top-level entry:
+
+```python
+entry = catalog.get("cmip6")
+dt = entry.to_datatree()
+```
+
+!!! note
+    `to_datatree()` requires `engine="zarr"` under the hood — it is applied
+    automatically. This differs from `to_xarray()` which auto-detects the engine.
+
 ## Filter by time and space
 
 ```python exec="true" html="true" session="discover"

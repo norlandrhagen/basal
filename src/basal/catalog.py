@@ -68,12 +68,17 @@ def _derive_metadata_from_store(
     branch: str = "main",
     config: icechunk.RepositoryConfig | None = None,
     derive_extent: bool = False,
+    group: str | None = None,
 ) -> dict:
     """Inspect a dataset store and return stable derived attrs + snapshot id."""
     from .inspect import inspect_store, stable_attrs
 
     info = inspect_store(
-        storage, branch=branch, config=config, derive_extent=derive_extent
+        storage,
+        branch=branch,
+        config=config,
+        derive_extent=derive_extent,
+        group=group,
     )
     derived = stable_attrs(info)
     derived["dataset_snapshot_id"] = info["dataset_snapshot_id"]
@@ -90,6 +95,7 @@ def _derive_time_extent(
     storage: icechunk.Storage,
     branch: str = "main",
     config: icechunk.RepositoryConfig | None = None,
+    group: str | None = None,
 ) -> dict:
     """Cheap refresh: read only the time coordinate for snapshot id + end_datetime.
 
@@ -109,7 +115,7 @@ def _derive_time_extent(
     derived: dict = {"dataset_snapshot_id": repo.lookup_branch(branch)}
     session = repo.readonly_session(branch=branch)
     with suppress_numcodecs_warning():
-        ds = xr.open_zarr(session.store, consolidated=False)
+        ds = xr.open_zarr(session.store, group=group, consolidated=False)
     time_da = _find_coord(ds, "time", _TIME_NAMES)
     if time_da is not None and time_da.size > 0:
         new_end = _np_dt_to_iso(time_da.values.max())
@@ -173,6 +179,7 @@ class Catalog:
         storage_config: dict | None = None,
         derive_extent: bool = False,
         inspect: bool = True,
+        group: str | None = None,
         **metadata: Any,
     ) -> None:
         """Register a dataset.
@@ -208,6 +215,13 @@ class Catalog:
             If False, skip store IO entirely — no CF attrs, var_names, or
             snapshot_id are auto-derived. Caller must supply all desired
             metadata as kwargs. Use for large stores or offline registration.
+        group:
+            Nested zarr group path for a single DataTree node (e.g.
+            "ACCESS-CM2/ssp245"). Recorded in metadata and used to target store
+            inspection, so derived attrs come from the node rather than the
+            (often empty) root. ``to_xarray()`` opens this group automatically.
+            To fan a whole DataTree out into one entry per node, use
+            ``register_datatree()`` instead.
         **metadata:
             Arbitrary metadata fields. Common optional fields: owner, title,
             license, tags. Pass location= to override the auto-derived URL.
@@ -237,7 +251,11 @@ class Catalog:
 
         derived = (
             _derive_metadata_from_store(
-                ic_storage, branch=branch, config=config, derive_extent=derive_extent
+                ic_storage,
+                branch=branch,
+                config=config,
+                derive_extent=derive_extent,
+                group=group,
             )
             if inspect
             else {}
@@ -268,6 +286,8 @@ class Catalog:
             **derived,
             **metadata,
         }
+        if group is not None:
+            entry_meta["group"] = group
         if derived_storage_config:
             entry_meta["storage_config"] = derived_storage_config
         if virtual_chunk_containers_config is not None:
@@ -284,6 +304,7 @@ class Catalog:
         store_config: dict | None = None,
         derive_extent: bool = False,
         inspect: bool = True,
+        group: str | None = None,
         **metadata: Any,
     ) -> None:
         """Register a plain Zarr store (not Icechunk).
@@ -324,7 +345,10 @@ class Catalog:
 
         if inspect:
             info = inspect_zarr_store(
-                location, store_config=store_config, derive_extent=derive_extent
+                location,
+                store_config=store_config,
+                derive_extent=derive_extent,
+                group=group,
             )
             derived = stable_attrs(info)
         else:
@@ -336,10 +360,111 @@ class Catalog:
             **derived,
             **metadata,
         }
+        if group is not None:
+            entry_meta["group"] = group
         if store_config:
             entry_meta["store_config"] = store_config
         entry_meta = finalize(entry_meta)
         self._commit_entry(name, entry_meta, existing=existing)
+
+    def register_datatree(
+        self,
+        prefix: str,
+        storage: icechunk.Storage | StorageSpec,
+        branch: str = "main",
+        config: icechunk.RepositoryConfig | None = None,
+        storage_config: dict | None = None,
+        derive_extent: bool = False,
+        leaves_only: bool = True,
+        name_fn: Callable[[str], str] | None = None,
+        metadata_fn: Callable[[str, dict], dict] | None = None,
+        update: bool = True,
+        **metadata: Any,
+    ) -> list[str]:
+        """Fan a DataTree-style Icechunk store out into one entry per group.
+
+        Opens every zarr group in the store once (via ``xr.open_groups``), then
+        registers each as its own catalog entry carrying the node's ``group``
+        path plus its own derived CF attrs / var_names / extent. All entries
+        share the same underlying store and ``dataset_snapshot_id``.
+
+        Parameters
+        ----------
+        prefix:
+            Name prefix for generated entries. An entry for group
+            ``"ACCESS-CM2/ssp245"`` becomes ``"<prefix>/ACCESS-CM2/ssp245"``.
+            The root group (path ``""``) maps to ``prefix`` itself.
+        storage, config, storage_config:
+            Same as ``register()`` — serialized so each entry's ``to_xarray()``
+            reopens the right store/group with no extra args.
+        derive_extent:
+            Read each node's coord arrays for bbox + temporal bounds.
+        leaves_only:
+            Skip groups with no data variables (empty DataTree parent nodes).
+        name_fn:
+            Optional ``group_path -> entry_name`` override. Wins over ``prefix``.
+        metadata_fn:
+            Optional ``(group_path, info) -> dict`` of per-node metadata, merged
+            on top of ``**metadata`` (per-node wins). ``info`` is the node's
+            inspect dict — ``info["global_attrs"]`` holds the node's raw zarr
+            attrs (e.g. ensemble, grid). Use to lift fields that vary per node.
+        update:
+            If True (default), re-registering an existing name updates it in
+            place rather than raising — makes the whole call idempotent.
+        **metadata:
+            Extra fields applied to every generated entry (owner, license, …).
+
+        Returns the list of entry names registered.
+        """
+        from .inspect import open_groups_info, stable_attrs
+        from .storage import StorageSpec
+
+        self._check_writable()
+        ic_storage = storage.build() if isinstance(storage, StorageSpec) else storage
+
+        snapshot_id, groups = open_groups_info(
+            ic_storage,
+            branch=branch,
+            config=config,
+            derive_extent=derive_extent,
+            leaves_only=leaves_only,
+        )
+        if not groups:
+            raise ValueError(
+                "No groups with data variables found in store. "
+                "Pass leaves_only=False to include empty parent nodes."
+            )
+
+        registered: list[str] = []
+        for path, info in groups.items():
+            derived = stable_attrs(info)
+            derived["dataset_snapshot_id"] = snapshot_id
+            if "virtual_chunk_containers" in info:
+                derived["virtual_chunk_containers"] = info["virtual_chunk_containers"]
+
+            if name_fn is not None:
+                name = name_fn(path)
+            elif path:
+                name = f"{prefix}/{path}"
+            else:
+                name = prefix
+
+            node_meta = metadata_fn(path, info) if metadata_fn is not None else {}
+            register = self.register_or_update if update else self.register
+            # inspect=False: groups are already open, so reuse derived attrs and
+            # snapshot_id rather than reopening the store once per node.
+            register(
+                name,
+                storage=storage,
+                branch=branch,
+                config=config,
+                storage_config=storage_config,
+                inspect=False,
+                group=path or None,
+                **{**derived, **metadata, **node_meta},
+            )
+            registered.append(name)
+        return registered
 
     def _assert_unregistered(self, name: str) -> bool:
         """Raise if ``name`` is actively registered; return whether its branch exists.
@@ -390,6 +515,7 @@ class Catalog:
         storage_config: dict | None = None,
         derive_extent: bool = False,
         inspect: bool = True,
+        group: str | None = None,
         **metadata: Any,
     ) -> str:
         """Register a dataset, or update its metadata if already registered.
@@ -407,12 +533,16 @@ class Catalog:
                 storage_config=storage_config,
                 derive_extent=derive_extent,
                 inspect=inspect,
+                group=group,
                 **metadata,
             )
             return "registered"
         except ValueError as e:
             if "already registered" in str(e):
-                self.update(name, **metadata)
+                update_meta = dict(metadata)
+                if group is not None:
+                    update_meta["group"] = group
+                self.update(name, **update_meta)
                 return "updated"
             raise
 
@@ -468,9 +598,13 @@ class Catalog:
         """
         entry = self.get(name)
         resolved = entry._resolve_storage(storage)
+        group = entry.metadata.get("group")
         if time_only:
             derived = _derive_time_extent(
-                resolved, branch=branch, config=entry._resolve_repo_config(config)
+                resolved,
+                branch=branch,
+                config=entry._resolve_repo_config(config),
+                group=group,
             )
         else:
             derived = _derive_metadata_from_store(
@@ -478,6 +612,7 @@ class Catalog:
                 branch=branch,
                 config=entry._resolve_repo_config(config),
                 derive_extent=derive_extent,
+                group=group,
             )
         updates = {**derived, **fields}
         before = entry.metadata

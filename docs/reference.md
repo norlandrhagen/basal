@@ -30,12 +30,15 @@ Auto-derived at registration — no need to set manually:
 
 - `geometry` (GeoJSON Polygon) — from `bbox`
 - `var_names`, `coord_names`, `dim_names` — from the store
+- `group` — zarr group path within the store (set when registering a single node or
+  via `register_datatree()`; absent for root-level entries)
 
 ### Icechunk vs Zarr entries
 
 | Feature | `format="icechunk"` | `format="zarr"` |
 |---|---|---|
 | `to_xarray()` | pin to branch / tag / snapshot | always reads latest |
+| `to_datatree()` | pin to branch / tag / snapshot | always reads latest |
 | `inspect()` | ✓ | ✓ |
 | `infer_extent()` | ✓ | ✓ |
 | `is_stale()` | ✓ snapshot comparison | ✗ |
