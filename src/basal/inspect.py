@@ -97,6 +97,7 @@ def inspect_store(
     branch: str = "main",
     config: icechunk.RepositoryConfig | None = None,
     derive_extent: bool = False,
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Read zarr metadata from an Icechunk store. No chunk data read.
 
@@ -115,6 +116,9 @@ def inspect_store(
     derive_extent:
         If True, read lat/lon/time coordinate arrays to extract STAC-compatible
         bbox and start_datetime/end_datetime. Reads coordinate data (small arrays).
+    group:
+        Nested zarr group path to open (e.g. a DataTree node). Defaults to the
+        root group.
 
     Returns a dict with:
       - dataset_snapshot_id: current HEAD snapshot id
@@ -134,14 +138,19 @@ def inspect_store(
     session = repo.readonly_session(branch=branch)
 
     with suppress_numcodecs_warning():
-        ds = xr.open_zarr(session.store, consolidated=False)
+        ds = xr.open_zarr(session.store, group=group, consolidated=False)
 
-    result: dict[str, Any] = {}
-
+    result = _dataset_to_info(ds, derive_extent=derive_extent)
     result["dataset_snapshot_id"] = session.snapshot_id
     vc = repo.config.virtual_chunk_containers
     if vc:
         result["virtual_chunk_containers"] = list(vc.keys())
+    return result
+
+
+def _dataset_to_info(ds: Any, derive_extent: bool = False) -> dict[str, Any]:
+    """Extract the structural metadata dict (attrs/vars/coords/dims) from a Dataset."""
+    result: dict[str, Any] = {}
     result["global_attrs"] = dict(ds.attrs)
     result["dims"] = dict(ds.sizes)
 
@@ -177,12 +186,14 @@ def inspect_zarr_store(
     location: str,
     store_config: dict | None = None,
     derive_extent: bool = False,
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Read zarr metadata from a plain Zarr store. No chunk data read.
 
     Uses obstore as the cloud backend (no gcsfs/s3fs required).
     Returns a dict with the same shape as inspect_store() minus
-    ``dataset_snapshot_id`` and ``virtual_chunk_containers``.
+    ``dataset_snapshot_id`` and ``virtual_chunk_containers``. Pass ``group`` to
+    inspect a nested zarr group (e.g. a DataTree node) instead of the root.
     """
     import xarray as xr
 
@@ -190,38 +201,48 @@ def inspect_zarr_store(
 
     store = build_zarr_store(location, store_config)
     with suppress_numcodecs_warning():
-        ds = xr.open_zarr(store, consolidated=False)
+        ds = xr.open_zarr(store, group=group, consolidated=False)
 
-    result: dict[str, Any] = {}
-    result["global_attrs"] = dict(ds.attrs)
-    result["dims"] = dict(ds.sizes)
+    return _dataset_to_info(ds, derive_extent=derive_extent)
 
-    variables = {}
-    for name, da in ds.data_vars.items():
-        entry: dict[str, Any] = {
-            "dtype": str(da.dtype),
-            "shape": list(da.shape),
-            "dims": list(da.dims),
-            "attrs": dict(da.attrs),
-        }
-        if da.encoding.get("chunks"):
-            entry["chunks"] = list(da.encoding["chunks"])
-        variables[str(name)] = entry
-    result["variables"] = variables
 
-    result["coords"] = {
-        str(name): {
-            "dtype": str(da.dtype),
-            "shape": list(da.shape),
-            "attrs": dict(da.attrs),
-        }
-        for name, da in ds.coords.items()
-    }
+def open_groups_info(
+    storage: icechunk.Storage,
+    branch: str = "main",
+    config: icechunk.RepositoryConfig | None = None,
+    derive_extent: bool = False,
+    leaves_only: bool = True,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Enumerate every zarr group in a DataTree-style Icechunk store.
 
-    if derive_extent:
-        result.update(extract_extent(ds))
+    Opens all groups in a single pass via ``xr.open_groups``. Returns the store's
+    ``dataset_snapshot_id`` and ``{group_path: info}`` where ``info`` is the same
+    shape as ``inspect_store``. ``group_path`` has no leading slash (root is "").
+    With ``leaves_only=True``, groups holding no data variables are dropped.
+    """
+    import xarray as xr
 
-    return result
+    kwargs: dict[str, Any] = {}
+    if config is not None:
+        kwargs["config"] = config
+    repo = icechunk.Repository.open(storage, **kwargs)
+    session = repo.readonly_session(branch=branch)
+
+    with suppress_numcodecs_warning():
+        groups = xr.open_groups(session.store, engine="zarr", consolidated=False)
+
+    vc = repo.config.virtual_chunk_containers
+    vc_prefixes = list(vc.keys()) if vc else None
+
+    out: dict[str, dict[str, Any]] = {}
+    for path, ds in groups.items():
+        if leaves_only and not ds.data_vars:
+            continue
+        info = _dataset_to_info(ds, derive_extent=derive_extent)
+        if vc_prefixes:
+            info["virtual_chunk_containers"] = vc_prefixes
+        out[path.lstrip("/")] = info
+    return session.snapshot_id, out
 
 
 def stable_attrs(info: dict[str, Any]) -> dict[str, Any]:

@@ -75,6 +75,61 @@ catalog.register_zarr(
 )
 ```
 
+### Register a single DataTree node
+
+Pass `group=` to target one node in a multi-group store. The group path is recorded
+in the entry so `to_xarray()` opens exactly that node — no extra args needed at read
+time:
+
+```python
+catalog.register(
+    "cmip6/ACCESS-CM2/ssp245",
+    storage=dataset_storage,
+    group="ACCESS-CM2/ssp245",
+    owner="csiro",
+    title="ACCESS-CM2 SSP2-4.5",
+)
+```
+
+`register_zarr()` accepts `group=` the same way.
+
+### Register a DataTree store (fan-out)
+
+`register_datatree()` walks every group in a DataTree-style store and registers each
+leaf as its own entry in one call. All entries share the same underlying store; each
+gets its own `group` path, derived CF attrs, and `dataset_snapshot_id`:
+
+```python
+names = catalog.register_datatree(
+    "cmip6",
+    storage=dataset_storage,
+    owner="cmip6-project",
+    license="CC-BY-4.0",
+    derive_extent=True,
+)
+# → ["cmip6/ACCESS-CM2/historical", "cmip6/ACCESS-CM2/ssp245", ...]
+```
+
+`leaves_only=True` (default) skips empty parent nodes that hold no data variables.
+`update=True` (default) makes the call idempotent — re-running updates existing
+entries rather than raising.
+
+Use `name_fn` or `metadata_fn` to customise names and per-node metadata:
+
+```python
+def my_meta(group_path: str, info: dict) -> dict:
+    # info["global_attrs"] has the node's zarr attrs
+    parts = group_path.split("/")
+    return {"model": parts[0], "scenario": parts[1] if len(parts) > 1 else None}
+
+catalog.register_datatree(
+    "cmip6",
+    storage=dataset_storage,
+    metadata_fn=my_meta,
+    owner="cmip6-project",
+)
+```
+
 ### Register a virtual Icechunk store (VirtualiZarr)
 
 Pass `config=` with virtual chunk container settings. basal serializes them so `to_xarray()` can reconstruct credentials automatically:

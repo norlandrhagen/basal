@@ -61,7 +61,7 @@ def test_register_zarr_stores_store_config(catalog, zarr_store, monkeypatch):
     monkeypatch.setattr(
         basal_inspect,
         "inspect_zarr_store",
-        lambda location, store_config=None, derive_extent=False: {
+        lambda location, store_config=None, derive_extent=False, group=None: {
             "global_attrs": {},
             "dims": {},
             "variables": {},
