@@ -1108,9 +1108,14 @@ class Catalog:
         from rich.table import Table
 
         entries = sorted(self.list(), key=lambda e: e.name)
-        table = Table(title=f"Catalog ({len(entries)} entries)")
+        table = Table(
+            title=f"Catalog ({len(entries)} entries)",
+            show_lines=True,
+            header_style="bold cyan",
+            border_style="bright_black",
+        )
         table.add_column("name", style="bold")
-        table.add_column("owner")
+        table.add_column("owner", style="magenta")
         table.add_column("title")
         table.add_column("location", style="dim")
 
