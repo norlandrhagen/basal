@@ -173,3 +173,94 @@ catalog.similar_to("ecmwf-aifs-single", n=4)
 ```
 
 All use DuckDB `array_cosine_similarity` — no external vector DB. Pass `use_schema=True` for richer embeddings from the full zarr schema.
+
+## Federated catalogs
+
+A `FederatedCatalog` presents a union of several catalogs behind the same read
+API (`list`, `get`, `filter`, `facets`, `search`, `sql`, …). It is read-only and
+holds no data of its own: each member stays its own source of truth and keeps its
+own register/update/expire lifecycle. Use it to search across catalogs as one.
+
+```python
+from basal import FederatedCatalog
+import icechunk
+
+nex = icechunk.s3_storage(bucket="carbonplan-share", prefix="nasa-nex-virtual/basal.icechunk", from_env=True)
+cmip6 = icechunk.s3_storage(bucket="carbonplan-share", prefix="cmip6/basal.icechunk", from_env=True)
+
+fed = FederatedCatalog.open({"nex": nex, "cmip6": cmip6})
+fed.list()        # entries from both, names namespaced: "nex/...", "cmip6/..."
+fed.filter(time_start="2020", time_end="2021")
+fed.search("daily precipitation", top_k=5)
+```
+
+Entries surface namespaced as `alias/name` (so names stay unique) and carry
+`entry.source` (the alias). `to_xarray()` works through the federation unchanged —
+each entry reopens its own store from its recorded config:
+
+```python
+ds = fed.get("cmip6/ACCESS-CM2/ssp245").to_xarray()
+```
+
+Display and discovery helpers carry over too — `fed.print()`, `fed.summary()`,
+`fed.describe("cmip6/...")`, `fed.fields()`, `fed.facets()`, `fed.similar_to(...)`,
+and the Jupyter HTML repr all work on the union. `FederatedCatalog.open` accepts
+`max_workers` (member fan-out concurrency) and `readonly` (members open read-only
+by default).
+
+### Membership and member failures
+
+Members can be inspected and mutated after construction:
+
+```python
+fed.members            # {alias: Catalog}
+fed.add("era5", cat)   # alias may not contain "/"
+fed.remove("nex")
+```
+
+By default a member whose `list()` fails (offline store, bad credentials) raises
+and aborts the union. Pass `strict=False` to skip failing members with a warning
+so one unreachable catalog doesn't blind discovery of the rest:
+
+```python
+fed = FederatedCatalog.open({"nex": nex, "cmip6": cmip6}, strict=False)
+fed.list()   # warns and skips any member that fails, returns the rest
+```
+
+### Catalog identity and default aliases
+
+The alias defaults to the catalog's own name (`Catalog.create(storage, name=...)`
+or `catalog.set_info(name=...)`, stored on the reserved `main` HEAD). Pass a list
+to use those names, or a dict to override:
+
+```python
+fed = FederatedCatalog([cat_a, cat_b])          # aliases = cat_a.name, cat_b.name
+fed = FederatedCatalog({"a": cat_a, "b": cat_b}) # explicit aliases
+```
+
+`source` is queryable in SQL (`""` for a plain catalog):
+
+```python
+fed.sql("SELECT name FROM entries WHERE source = 'cmip6'")
+```
+
+### Persistent merge (export)
+
+`materialize()` snapshots the union into a new standalone catalog by
+re-registering every entry (reusing each entry's stored config — no store IO):
+
+```python
+merged = fed.materialize(icechunk.s3_storage(bucket="b", prefix="merged", from_env=True))
+```
+
+`Catalog.merge` is sugar for the same thing, starting from existing catalogs:
+
+```python
+from basal import Catalog
+merged = Catalog.merge([cat_a, cat_b], storage)   # == FederatedCatalog([...]).materialize(storage)
+```
+
+This is a point-in-time copy and its own source of truth afterward — it does not
+track the members. It writes one commit per entry, which is the dominant cost on
+object storage (see [Scaling](manage.md)), so prefer live federation for everyday
+discovery and reserve `materialize()` for publishing one stable catalog URL.

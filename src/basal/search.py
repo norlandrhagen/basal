@@ -1,6 +1,7 @@
 """SQL and similarity search over catalog metadata using DuckDB and arro3.
 
-DuckDB table schema: (name VARCHAR, snapshot_id VARCHAR, metadata JSON).
+DuckDB table schema: (name VARCHAR, snapshot_id VARCHAR, source VARCHAR, metadata JSON).
+``source`` is the FederatedCatalog member alias ("" for a plain Catalog).
 Use metadata->>'field' for scalar extraction, DuckDB JSON functions for arrays.
 
 An alternative backend could use Apache DataFusion — it would integrate more
@@ -17,8 +18,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 if TYPE_CHECKING:
     import duckdb
 
@@ -29,21 +28,27 @@ if TYPE_CHECKING:
 def _build_connection(catalog: Catalog) -> duckdb.DuckDBPyConnection:
     import arro3.core as ac
     import duckdb
+    import numpy as np
 
     entries = catalog.list()
     con = duckdb.connect()
 
     if not entries:
         con.execute(
-            "CREATE TABLE entries (name VARCHAR, snapshot_id VARCHAR, metadata JSON)"
+            "CREATE TABLE entries "
+            "(name VARCHAR, snapshot_id VARCHAR, source VARCHAR, metadata JSON)"
         )
         return con
 
     names = ac.Array.from_numpy(np.array([e.name for e in entries]))
     snaps = ac.Array.from_numpy(np.array([e.snapshot_id for e in entries]))
+    # source is "" for a plain Catalog, the member alias for a FederatedCatalog.
+    sources = ac.Array.from_numpy(np.array([e.source or "" for e in entries]))
     metas = ac.Array.from_numpy(np.array([json.dumps(e.metadata) for e in entries]))
 
-    tbl = ac.Table.from_pydict({"name": names, "snapshot_id": snaps, "metadata": metas})
+    tbl = ac.Table.from_pydict(
+        {"name": names, "snapshot_id": snaps, "source": sources, "metadata": metas}
+    )
     con.register("entries", tbl)
     return con
 
@@ -60,12 +65,20 @@ def sql(catalog: Catalog, query: str) -> list[tuple]:
     >>> sql(catalog, "SELECT name, metadata->>'title' AS title FROM entries ORDER BY name")
     >>> sql(catalog, "SELECT name FROM entries WHERE list_contains(CAST(metadata->'keywords' AS VARCHAR[]), 'ocean')")
     """
-    return _build_connection(catalog).execute(query).fetchall()
+    con = _build_connection(catalog)
+    try:
+        return con.execute(query).fetchall()
+    finally:
+        con.close()
 
 
 def sql_df(catalog: Catalog, query: str):
     """Same as sql() but returns a pandas DataFrame."""
-    return _build_connection(catalog).execute(query).df()
+    con = _build_connection(catalog)
+    try:
+        return con.execute(query).df()
+    finally:
+        con.close()
 
 
 # --- similarity search ---
@@ -141,6 +154,7 @@ def similar(
     """
     import arro3.core as ac
     import duckdb
+    import numpy as np
 
     if embed_fn is None:
         try:
@@ -306,6 +320,7 @@ def similar_by_schema(
     list of (Entry, score) sorted by descending similarity.
     """
     import duckdb
+    import numpy as np
 
     if embed_fn is None:
         try:

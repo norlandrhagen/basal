@@ -21,6 +21,9 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 DELETED_KEY = "__deleted__"
 """Marker committed at a branch HEAD to flag a deregistered (reversibly deleted) entry."""
 
+CATALOG_KEY = "__catalog__"
+"""Marker on the main-branch HEAD distinguishing catalog-level metadata from an entry."""
+
 
 def _parse_iso_dt(s: str) -> datetime:
     """Parse ISO 8601 string to UTC-aware datetime. Accepts year, year-month, or full date."""
@@ -124,23 +127,416 @@ def _derive_time_extent(
     return derived
 
 
-class Catalog:
+class CatalogReadMixin:
+    """Read, search, and discovery ops defined purely via ``list()`` and ``get()``.
+
+    Shared by ``Catalog`` (one icechunk repo) and ``FederatedCatalog`` (a union of
+    catalogs). Subclasses must implement ``list()`` and ``get()``; every method here
+    is a pure function of those two, so federation reuses them with zero drift.
+    """
+
+    def list(self) -> list[Entry]:  # noqa: A003
+        raise NotImplementedError
+
+    def get(self, name: str, include_deleted: bool = False) -> Entry:
+        raise NotImplementedError
+
+    # --- search ---
+
+    def sql(self, query: str) -> list[tuple]:
+        """Run DuckDB SQL over entries(name VARCHAR, snapshot_id VARCHAR, source VARCHAR, metadata JSON)."""
+        from .search import sql
+
+        return sql(self, query)
+
+    def search(
+        self,
+        query: str,
+        embed_fn=None,
+        top_k: int = 5,
+        use_schema: bool = False,
+        pre_filter: str | None = None,
+    ) -> list[tuple]:
+        """Find entries most similar to a free-text query using vector cosine similarity.
+
+        Shorthand for similar(catalog, query). Requires basal[search].
+
+        Parameters
+        ----------
+        use_schema
+            If True, lazily fetches the full zarr schema from each registered store
+            (all da.attrs, coord attrs, global_attrs) for richer embeddings. Results
+            are cached in-memory by snapshot_id. Ignored when False (default), which
+            uses only the CF attrs cached at registration time.
+        pre_filter
+            DuckDB SQL WHERE clause on the variable-level schema table. Only used
+            when use_schema=True. See similar_by_schema() for available columns.
+        """
+        if use_schema:
+            from .search import similar_by_schema
+
+            return similar_by_schema(
+                self, query, pre_filter=pre_filter, embed_fn=embed_fn, top_k=top_k
+            )
+
+        from .search import similar
+
+        return similar(self, query, embed_fn=embed_fn, top_k=top_k)
+
+    def similar_to(
+        self,
+        name: str,
+        n: int = 5,
+        embed_fn: Callable[[list[str]], Any] | None = None,
+    ) -> list[tuple[Entry, float]]:
+        """Find entries most similar to ``name``, excluding ``name`` itself."""
+        from .search import _entry_text, similar
+
+        entry = self.get(name)
+        query = _entry_text(entry)
+        results = similar(self, query, embed_fn=embed_fn, top_k=n + 1)
+        return [(e, s) for e, s in results if e.name != name][:n]
+
+    # --- field discovery ---
+
+    def fields(self) -> set[str]:
+        """Return union of all metadata keys across entries."""
+        out: set[str] = set()
+        for e in self.list():
+            out.update(e.metadata.keys())
+        return out
+
+    def values(self, field: str) -> list[Any]:
+        """Distinct values for ``field``, list-valued fields flattened."""
+        hashable_seen: set = set()
+        unhashable_seen: list = []
+        ordered: list[Any] = []
+        for e in self.list():
+            v = e.metadata.get(field)
+            if v is None:
+                continue
+            items = v if isinstance(v, (list | tuple)) else [v]
+            for item in items:
+                try:
+                    if item in hashable_seen:
+                        continue
+                    hashable_seen.add(item)
+                except TypeError:
+                    if item in unhashable_seen:
+                        continue
+                    unhashable_seen.append(item)
+                ordered.append(item)
+        return ordered
+
+    def facets(self) -> dict[str, Counter]:
+        """``{field: Counter(value -> freq)}`` for scalar + list-valued fields.
+
+        Excludes high-cardinality / free-text fields listed in ``FACET_DENYLIST``.
+        """
+        out: dict[str, Counter] = {}
+        for e in self.list():
+            for k, v in e.metadata.items():
+                if k in FACET_DENYLIST:
+                    continue
+                items = v if isinstance(v, (list | tuple)) else [v]
+                for item in items:
+                    if isinstance(item, (str | int | float | bool)):
+                        out.setdefault(k, Counter())[item] += 1
+        return out
+
+    # --- filter ---
+
+    def filter(
+        self,
+        *,
+        time_start: str | None = None,
+        time_end: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+    ) -> list[Entry]:
+        """Return entries matching optional temporal and/or spatial bounds.
+
+        Fields used: ``start_datetime`` / ``end_datetime`` (ISO 8601) and
+        ``bbox`` ([west, south, east, north] WGS84) — matching STAC conventions.
+        Entries missing a queried field are excluded and a warning is issued.
+
+        Parameters
+        ----------
+        time_start:
+            ISO 8601 string (e.g. ``"2020"`` or ``"2020-06-01"``), or ``"*"``
+            for an open lower bound. Filter excludes entries whose coverage
+            ends before this date.
+        time_end:
+            ISO 8601 string or ``"*"`` for an open upper bound. Filter
+            excludes entries that start after this date.
+        bbox:
+            ``(west, south, east, north)`` in WGS84 decimal degrees. Entries
+            must spatially intersect this rectangle.
+        """
+        do_temporal = time_start is not None or time_end is not None
+        do_spatial = bbox is not None
+
+        if not do_temporal and not do_spatial:
+            return self.list()
+
+        t_start = (
+            _parse_iso_dt(time_start) if time_start and time_start != "*" else None
+        )
+        t_end = _parse_iso_dt(time_end) if time_end and time_end != "*" else None
+
+        _EPOCH = datetime(1, 1, 1, tzinfo=UTC)
+        _FAR_FUTURE = datetime(9999, 12, 31, tzinfo=UTC)
+
+        results: list[Entry] = []
+        temporal_missing: list[str] = []
+        spatial_missing: list[str] = []
+
+        for entry in self.list():
+            if do_temporal:
+                e_start_raw = entry.metadata.get("start_datetime")
+                e_end_raw = entry.metadata.get("end_datetime")
+                if e_start_raw is None and e_end_raw is None:
+                    temporal_missing.append(entry.name)
+                    continue
+                e_start = _parse_iso_dt(e_start_raw) if e_start_raw else _EPOCH
+                e_end = _parse_iso_dt(e_end_raw) if e_end_raw else _FAR_FUTURE
+                # overlap: entry interval intersects filter interval
+                if t_end is not None and e_start > t_end:
+                    continue
+                if t_start is not None and e_end < t_start:
+                    continue
+
+            if do_spatial:
+                from .stac import bbox_overlaps
+
+                e_bbox = entry.metadata.get("bbox")
+                if e_bbox is None:
+                    spatial_missing.append(entry.name)
+                    continue
+                if not bbox_overlaps(list(e_bbox), list(bbox)):
+                    continue
+
+            results.append(entry)
+
+        if temporal_missing:
+            warnings.warn(
+                f"{len(temporal_missing)} entr{'y' if len(temporal_missing) == 1 else 'ies'} "
+                f"skipped — no start_datetime/end_datetime: {temporal_missing}. "
+                "Add with: catalog.update(name, start_datetime='2020-01-01', end_datetime='2023-12-31')",
+                stacklevel=2,
+            )
+        if spatial_missing:
+            warnings.warn(
+                f"{len(spatial_missing)} entr{'y' if len(spatial_missing) == 1 else 'ies'} "
+                f"skipped — no bbox: {spatial_missing}. "
+                "Add with: catalog.update(name, bbox=[west, south, east, north])",
+                stacklevel=2,
+            )
+
+        return results
+
+    # --- export ---
+
+    def to_stac(self, collection_id: str = "basal-catalog") -> dict:
+        """Export catalog as a STAC Collection with Items.
+
+        Uses the same entry -> Item conversion as the STAC API server
+        (``basal.stac.entry_to_stac_item``). Entries without bbox get null
+        geometry — valid per STAC spec for non-spatial datasets.
+
+        Returns a dict with:
+          - "collection": STAC Collection object
+          - "items": list of STAC Item dicts
+
+        Full STAC spec: https://github.com/radiantearth/stac-spec/
+        """
+        from .stac import STAC_VERSION, entry_to_stac_item, union_bbox
+
+        items = [entry_to_stac_item(e, collection_id) for e in self.list()]
+
+        collection = {
+            "type": "Collection",
+            "id": collection_id,
+            "stac_version": STAC_VERSION,
+            "description": "Icechunk dataset catalog exported from basal",
+            "links": [],
+            "extent": {
+                "spatial": {"bbox": [union_bbox(items)]},
+                "temporal": {"interval": [[None, None]]},
+            },
+            "license": "various",
+        }
+
+        return {"collection": collection, "items": items}
+
+    # --- pretty printing ---
+
+    def summary(self) -> None:
+        """Print field coverage across all entries, flagging missing recommended fields."""
+        from rich.console import Console
+        from rich.table import Table
+
+        from .schema import RECOMMENDED_FIELDS
+
+        entries = self.list()
+        n = len(entries)
+        if not n:
+            Console().print("[dim]Empty catalog[/dim]")
+            return
+
+        all_fields: set[str] = set()
+        for e in entries:
+            all_fields.update(e.metadata.keys())
+
+        # recommended first, then remaining sorted
+        ordered = list(RECOMMENDED_FIELDS) + sorted(
+            f for f in all_fields if f not in RECOMMENDED_FIELDS
+        )
+
+        table = Table(title=f"Catalog summary ({n} entries)", show_header=True)
+        table.add_column("field", style="bold")
+        table.add_column("coverage", justify="right")
+        table.add_column("bar")
+        table.add_column("recommended", justify="center")
+
+        bar_width = 20
+        for field in ordered:
+            if field not in all_fields:
+                count = 0
+            else:
+                count = sum(1 for e in entries if field in e.metadata)
+            frac = count / n
+            filled = int(frac * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            coverage = f"{count}/{n}"
+            is_rec = "✓" if field in RECOMMENDED_FIELDS else ""
+            color = "green" if frac == 1.0 else ("yellow" if frac > 0 else "red")
+            table.add_row(field, coverage, f"[{color}]{bar}[/{color}]", is_rec)
+
+        Console().print(table)
+
+        missing_rec = [
+            f for f in RECOMMENDED_FIELDS if not all(f in e.metadata for e in entries)
+        ]
+        if missing_rec:
+            Console().print(
+                f"\n[yellow]Recommended fields with incomplete coverage:[/yellow] "
+                f"{', '.join(missing_rec)}\n"
+                f"[dim]See STAC spec: https://github.com/radiantearth/stac-spec/"
+                f"blob/master/item-spec/item-spec.md[/dim]"
+            )
+
+    def describe(self, name: str) -> None:
+        """Print a rich-formatted description of a catalog entry."""
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+
+        entry = self.get(name)
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("field", style="bold cyan")
+        table.add_column("value")
+
+        for k, v in entry.metadata.items():
+            table.add_row(k, str(v))
+        table.add_row("snapshot_id", f"[dim]{entry.snapshot_id}[/dim]")
+        table.add_row("written_at", str(entry.written_at))
+
+        Console().print(
+            Panel(table, title=f"[bold]{entry.name}[/bold]", border_style="blue")
+        )
+
+    def print(self) -> None:
+        """Print all catalog entries as a rich table."""
+        from rich.console import Console
+        from rich.table import Table
+
+        entries = sorted(self.list(), key=lambda e: e.name)
+        table = Table(
+            title=f"Catalog ({len(entries)} entries)",
+            show_lines=True,
+            header_style="bold cyan",
+            border_style="bright_black",
+        )
+        table.add_column("name", style="bold")
+        table.add_column("owner", style="magenta")
+        table.add_column("title")
+        table.add_column("location", style="dim")
+
+        for e in entries:
+            table.add_row(
+                e.name,
+                e.owner,
+                e.metadata.get("title", ""),
+                e.location,
+            )
+        Console().print(table)
+
+    def __repr__(self) -> str:
+        # Count via list() so deregistered/locationless branches don't inflate it.
+        return f"<{type(self).__name__} with {len(self.list())} entries>"
+
+    def _repr_html_(self) -> str:
+        from html import escape
+
+        entries = sorted(self.list(), key=lambda e: e.name)
+        rows = "".join(
+            f"<tr><td><b>{escape(e.name)}</b></td><td>{escape(str(e.owner))}</td>"
+            f"<td>{escape(str(e.metadata.get('title', '')))}</td>"
+            f"<td><code>{escape(e.location)}</code></td></tr>"
+            for e in entries
+        )
+        return (
+            f"<table><thead><tr>"
+            f"<th colspan=4>Catalog ({len(entries)} entries)</th></tr>"
+            f"<tr><th>name</th><th>owner</th><th>title</th><th>location</th></tr>"
+            f"</thead><tbody>{rows}</tbody></table>"
+        )
+
+
+class Catalog(CatalogReadMixin):
     """Dataset catalog backed by a single Icechunk repository.
 
     Each registered dataset is an orphan-style branch whose HEAD snapshot
     carries the entry's metadata. Reads use ``inspect_repo_info`` for a
-    single atomic fetch of all entries.
+    single atomic fetch of all entries. The reserved ``main`` branch HEAD
+    carries catalog-level metadata (name, owner, description).
     """
 
     def __init__(self, repo: icechunk.Repository, readonly: bool = False) -> None:
         self._repo = repo
         self._readonly = readonly
+        self._info_cache: dict | None = None
 
     @classmethod
-    def create(cls, storage: icechunk.Storage) -> Catalog:
+    def create(
+        cls,
+        storage: icechunk.Storage,
+        *,
+        name: str | None = None,
+        owner: str | None = None,
+        description: str | None = None,
+        **info: Any,
+    ) -> Catalog:
+        """Create a catalog, recording optional catalog-level identity on ``main``.
+
+        ``name``/``owner``/``description`` (and any extra ``info``) are stored on the
+        reserved ``main`` HEAD. ``name`` is the catalog's default alias when it is a
+        member of a ``FederatedCatalog``.
+        """
         repo = icechunk.Repository.create(storage)
         session = repo.writable_session("main")
-        session.commit("init catalog", allow_empty=True)
+        meta = {
+            k: v
+            for k, v in {
+                "name": name,
+                "owner": owner,
+                "description": description,
+                **info,
+            }.items()
+            if v is not None
+        }
+        commit_meta = {**meta, CATALOG_KEY: True} if meta else None
+        session.commit("init catalog", metadata=commit_meta, allow_empty=True)
         return cls(repo)
 
     @classmethod
@@ -160,6 +556,70 @@ class Catalog:
                 return cls.open(storage)
             raise
 
+    @classmethod
+    def merge(
+        cls,
+        sources: dict[str, Catalog] | list[Catalog] | list[tuple[str, Catalog]],
+        storage: icechunk.Storage,
+        *,
+        create: bool = True,
+    ) -> Catalog:
+        """Merge existing catalogs into one new standalone catalog at ``storage``.
+
+        Sugar for ``FederatedCatalog(sources).materialize(storage)``: re-registers
+        every source entry (namespaced ``alias/name``) into a fresh repo, reusing
+        each entry's stored config (no store IO). The result is a point-in-time
+        copy and its own source of truth. For live cross-catalog search without a
+        copy, use ``FederatedCatalog`` instead.
+
+        ``create=True`` (default) requires a fresh ``storage``; pass
+        ``create=False`` to merge into an existing repo via ``open_or_create``.
+        """
+        from .federated import FederatedCatalog
+
+        return FederatedCatalog(sources).materialize(storage, create=create)
+
+    # --- catalog-level identity ---
+
+    def _catalog_info(self) -> dict:
+        """Catalog-level metadata recorded on the ``main`` HEAD (internal keys stripped).
+
+        Cached on the instance — ``main`` HEAD only moves via ``set_info`` (this
+        instance), which invalidates. A concurrent writer on another instance is
+        not observed until reopen.
+        """
+        if self._info_cache is None:
+            snap_id = self._repo.lookup_branch("main")
+            meta = self._repo.lookup_snapshot(snap_id).metadata or {}
+            self._info_cache = _strip_internal(meta)
+        return self._info_cache
+
+    @property
+    def info(self) -> dict:
+        """Catalog-level metadata (name, owner, description, ...)."""
+        return self._catalog_info()
+
+    @property
+    def name(self) -> str | None:
+        """Catalog name — the default federation alias. None if unset."""
+        return self._catalog_info().get("name")
+
+    @property
+    def owner(self) -> str | None:
+        return self._catalog_info().get("owner")
+
+    def set_info(self, **fields: Any) -> None:
+        """Merge ``fields`` into catalog-level metadata on ``main`` (new values win)."""
+        self._check_writable()
+        merged = {**self._catalog_info(), **fields}
+        session = self._repo.writable_session("main")
+        session.commit(
+            "update catalog info",
+            metadata={**merged, CATALOG_KEY: True},
+            allow_empty=True,
+        )
+        self._info_cache = None
+
     # --- mutations ---
 
     def _check_writable(self) -> None:
@@ -172,7 +632,7 @@ class Catalog:
     def register(
         self,
         name: str,
-        storage: icechunk.Storage | StorageSpec,
+        storage: icechunk.Storage | StorageSpec | None = None,
         format: str = "icechunk",
         branch: str = "main",
         config: icechunk.RepositoryConfig | None = None,
@@ -195,7 +655,8 @@ class Catalog:
             local_filesystem_storage(), etc. The spec captures exact constructor
             kwargs so the config is serialized losslessly and rebuilt later. A raw
             icechunk.Storage is also accepted but only alongside storage_config=,
-            since icechunk.Storage itself cannot be serialized.
+            since icechunk.Storage itself cannot be serialized. May be None only
+            with inspect=False (offline registration from metadata alone).
         storage_config:
             Serializable storage config dict. Required when storage is a raw
             icechunk.Storage; optional override when storage is a StorageSpec.
@@ -234,6 +695,11 @@ class Catalog:
 
         _validate_name(name)
         self._check_writable()
+        if storage is None and inspect:
+            raise ValueError(
+                "storage=None requires inspect=False — there is no store to inspect. "
+                "Pass storage=, or inspect=False with location=/storage_config=."
+            )
         # Check name availability before the (expensive) store inspection so
         # register_or_update's update path doesn't pay for a discarded inspect.
         existing = self._assert_unregistered(name)
@@ -508,7 +974,7 @@ class Catalog:
     def register_or_update(
         self,
         name: str,
-        storage: icechunk.Storage | StorageSpec,
+        storage: icechunk.Storage | StorageSpec | None = None,
         format: str = "icechunk",
         branch: str = "main",
         config: icechunk.RepositoryConfig | None = None,
@@ -725,199 +1191,6 @@ class Catalog:
             )
         return collect_history(self._repo, name=name, limit=limit)
 
-    # --- search ---
-
-    def sql(self, query: str) -> list[tuple]:
-        """Run DuckDB SQL over entries(name VARCHAR, snapshot_id VARCHAR, metadata JSON)."""
-        from .search import sql
-
-        return sql(self, query)
-
-    def search(
-        self,
-        query: str,
-        embed_fn=None,
-        top_k: int = 5,
-        use_schema: bool = False,
-        pre_filter: str | None = None,
-    ) -> list[tuple]:
-        """Find entries most similar to a free-text query using vector cosine similarity.
-
-        Shorthand for similar(catalog, query). Requires basal[search].
-
-        Parameters
-        ----------
-        use_schema
-            If True, lazily fetches the full zarr schema from each registered store
-            (all da.attrs, coord attrs, global_attrs) for richer embeddings. Results
-            are cached in-memory by snapshot_id. Ignored when False (default), which
-            uses only the CF attrs cached at registration time.
-        pre_filter
-            DuckDB SQL WHERE clause on the variable-level schema table. Only used
-            when use_schema=True. See similar_by_schema() for available columns.
-        """
-        if use_schema:
-            from .search import similar_by_schema
-
-            return similar_by_schema(
-                self, query, pre_filter=pre_filter, embed_fn=embed_fn, top_k=top_k
-            )
-
-        from .search import similar
-
-        return similar(self, query, embed_fn=embed_fn, top_k=top_k)
-
-    def similar_to(
-        self,
-        name: str,
-        n: int = 5,
-        embed_fn: Callable[[list[str]], Any] | None = None,
-    ) -> list[tuple[Entry, float]]:
-        """Find entries most similar to ``name``, excluding ``name`` itself."""
-        from .search import _entry_text, similar
-
-        entry = self.get(name)
-        query = _entry_text(entry)
-        results = similar(self, query, embed_fn=embed_fn, top_k=n + 1)
-        return [(e, s) for e, s in results if e.name != name][:n]
-
-    # --- field discovery ---
-
-    def fields(self) -> set[str]:
-        """Return union of all metadata keys across entries."""
-        out: set[str] = set()
-        for e in self.list():
-            out.update(e.metadata.keys())
-        return out
-
-    def values(self, field: str) -> list[Any]:
-        """Distinct values for ``field``, list-valued fields flattened."""
-        hashable_seen: set = set()
-        unhashable_seen: list = []
-        ordered: list[Any] = []
-        for e in self.list():
-            v = e.metadata.get(field)
-            if v is None:
-                continue
-            items = v if isinstance(v, (list | tuple)) else [v]
-            for item in items:
-                try:
-                    if item in hashable_seen:
-                        continue
-                    hashable_seen.add(item)
-                except TypeError:
-                    if item in unhashable_seen:
-                        continue
-                    unhashable_seen.append(item)
-                ordered.append(item)
-        return ordered
-
-    def facets(self) -> dict[str, Counter]:
-        """``{field: Counter(value -> freq)}`` for scalar + list-valued fields.
-
-        Excludes high-cardinality / free-text fields listed in ``FACET_DENYLIST``.
-        """
-        out: dict[str, Counter] = {}
-        for e in self.list():
-            for k, v in e.metadata.items():
-                if k in FACET_DENYLIST:
-                    continue
-                items = v if isinstance(v, (list | tuple)) else [v]
-                for item in items:
-                    if isinstance(item, (str | int | float | bool)):
-                        out.setdefault(k, Counter())[item] += 1
-        return out
-
-    # --- filter ---
-
-    def filter(
-        self,
-        *,
-        time_start: str | None = None,
-        time_end: str | None = None,
-        bbox: tuple[float, float, float, float] | None = None,
-    ) -> list[Entry]:
-        """Return entries matching optional temporal and/or spatial bounds.
-
-        Fields used: ``start_datetime`` / ``end_datetime`` (ISO 8601) and
-        ``bbox`` ([west, south, east, north] WGS84) — matching STAC conventions.
-        Entries missing a queried field are excluded and a warning is issued.
-
-        Parameters
-        ----------
-        time_start:
-            ISO 8601 string (e.g. ``"2020"`` or ``"2020-06-01"``), or ``"*"``
-            for an open lower bound. Filter excludes entries whose coverage
-            ends before this date.
-        time_end:
-            ISO 8601 string or ``"*"`` for an open upper bound. Filter
-            excludes entries that start after this date.
-        bbox:
-            ``(west, south, east, north)`` in WGS84 decimal degrees. Entries
-            must spatially intersect this rectangle.
-        """
-        do_temporal = time_start is not None or time_end is not None
-        do_spatial = bbox is not None
-
-        if not do_temporal and not do_spatial:
-            return self.list()
-
-        t_start = (
-            _parse_iso_dt(time_start) if time_start and time_start != "*" else None
-        )
-        t_end = _parse_iso_dt(time_end) if time_end and time_end != "*" else None
-
-        _EPOCH = datetime(1, 1, 1, tzinfo=UTC)
-        _FAR_FUTURE = datetime(9999, 12, 31, tzinfo=UTC)
-
-        results: list[Entry] = []
-        temporal_missing: list[str] = []
-        spatial_missing: list[str] = []
-
-        for entry in self.list():
-            if do_temporal:
-                e_start_raw = entry.metadata.get("start_datetime")
-                e_end_raw = entry.metadata.get("end_datetime")
-                if e_start_raw is None and e_end_raw is None:
-                    temporal_missing.append(entry.name)
-                    continue
-                e_start = _parse_iso_dt(e_start_raw) if e_start_raw else _EPOCH
-                e_end = _parse_iso_dt(e_end_raw) if e_end_raw else _FAR_FUTURE
-                # overlap: entry interval intersects filter interval
-                if t_end is not None and e_start > t_end:
-                    continue
-                if t_start is not None and e_end < t_start:
-                    continue
-
-            if do_spatial:
-                from .stac import bbox_overlaps
-
-                e_bbox = entry.metadata.get("bbox")
-                if e_bbox is None:
-                    spatial_missing.append(entry.name)
-                    continue
-                if not bbox_overlaps(list(e_bbox), list(bbox)):
-                    continue
-
-            results.append(entry)
-
-        if temporal_missing:
-            warnings.warn(
-                f"{len(temporal_missing)} entr{'y' if len(temporal_missing) == 1 else 'ies'} "
-                f"skipped — no start_datetime/end_datetime: {temporal_missing}. "
-                "Add with: catalog.update(name, start_datetime='2020-01-01', end_datetime='2023-12-31')",
-                stacklevel=2,
-            )
-        if spatial_missing:
-            warnings.warn(
-                f"{len(spatial_missing)} entr{'y' if len(spatial_missing) == 1 else 'ies'} "
-                f"skipped — no bbox: {spatial_missing}. "
-                "Add with: catalog.update(name, bbox=[west, south, east, north])",
-                stacklevel=2,
-            )
-
-        return results
-
     # --- bulk maintenance ---
 
     def refresh(self) -> dict[str, bool]:
@@ -990,159 +1263,3 @@ class Catalog:
         if garbage_collect:
             self._repo.garbage_collect(older_than)
         return expired
-
-    # --- export ---
-
-    def to_stac(self, collection_id: str = "basal-catalog") -> dict:
-        """Export catalog as a STAC Collection with Items.
-
-        Uses the same entry -> Item conversion as the STAC API server
-        (``basal.stac.entry_to_stac_item``). Entries without bbox get null
-        geometry — valid per STAC spec for non-spatial datasets.
-
-        Returns a dict with:
-          - "collection": STAC Collection object
-          - "items": list of STAC Item dicts
-
-        Full STAC spec: https://github.com/radiantearth/stac-spec/
-        """
-        from .stac import STAC_VERSION, entry_to_stac_item, union_bbox
-
-        items = [entry_to_stac_item(e, collection_id) for e in self.list()]
-
-        collection = {
-            "type": "Collection",
-            "id": collection_id,
-            "stac_version": STAC_VERSION,
-            "description": "Icechunk dataset catalog exported from basal",
-            "links": [],
-            "extent": {
-                "spatial": {"bbox": [union_bbox(items)]},
-                "temporal": {"interval": [[None, None]]},
-            },
-            "license": "various",
-        }
-
-        return {"collection": collection, "items": items}
-
-    # --- pretty printing ---
-
-    def summary(self) -> None:
-        """Print field coverage across all entries, flagging missing recommended fields."""
-        from rich.console import Console
-        from rich.table import Table
-
-        from .schema import RECOMMENDED_FIELDS
-
-        entries = self.list()
-        n = len(entries)
-        if not n:
-            Console().print("[dim]Empty catalog[/dim]")
-            return
-
-        all_fields: set[str] = set()
-        for e in entries:
-            all_fields.update(e.metadata.keys())
-
-        # recommended first, then remaining sorted
-        ordered = list(RECOMMENDED_FIELDS) + sorted(
-            f for f in all_fields if f not in RECOMMENDED_FIELDS
-        )
-
-        table = Table(title=f"Catalog summary ({n} entries)", show_header=True)
-        table.add_column("field", style="bold")
-        table.add_column("coverage", justify="right")
-        table.add_column("bar")
-        table.add_column("recommended", justify="center")
-
-        bar_width = 20
-        for field in ordered:
-            if field not in all_fields:
-                count = 0
-            else:
-                count = sum(1 for e in entries if field in e.metadata)
-            frac = count / n
-            filled = int(frac * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            coverage = f"{count}/{n}"
-            is_rec = "✓" if field in RECOMMENDED_FIELDS else ""
-            color = "green" if frac == 1.0 else ("yellow" if frac > 0 else "red")
-            table.add_row(field, coverage, f"[{color}]{bar}[/{color}]", is_rec)
-
-        Console().print(table)
-
-        missing_rec = [
-            f for f in RECOMMENDED_FIELDS if not all(f in e.metadata for e in entries)
-        ]
-        if missing_rec:
-            Console().print(
-                f"\n[yellow]Recommended fields with incomplete coverage:[/yellow] "
-                f"{', '.join(missing_rec)}\n"
-                f"[dim]See STAC spec: https://github.com/radiantearth/stac-spec/"
-                f"blob/master/item-spec/item-spec.md[/dim]"
-            )
-
-    def describe(self, name: str) -> None:
-        """Print a rich-formatted description of a catalog entry."""
-        from rich.console import Console
-        from rich.panel import Panel
-        from rich.table import Table
-
-        entry = self.get(name)
-        table = Table(show_header=False, box=None, pad_edge=False)
-        table.add_column("field", style="bold cyan")
-        table.add_column("value")
-
-        for k, v in entry.metadata.items():
-            table.add_row(k, str(v))
-        table.add_row("snapshot_id", f"[dim]{entry.snapshot_id}[/dim]")
-        table.add_row("written_at", str(entry.written_at))
-
-        Console().print(
-            Panel(table, title=f"[bold]{entry.name}[/bold]", border_style="blue")
-        )
-
-    def print(self) -> None:
-        """Print all catalog entries as a rich table."""
-        from rich.console import Console
-        from rich.table import Table
-
-        entries = sorted(self.list(), key=lambda e: e.name)
-        table = Table(
-            title=f"Catalog ({len(entries)} entries)",
-            show_lines=True,
-            header_style="bold cyan",
-            border_style="bright_black",
-        )
-        table.add_column("name", style="bold")
-        table.add_column("owner", style="magenta")
-        table.add_column("title")
-        table.add_column("location", style="dim")
-
-        for e in entries:
-            table.add_row(
-                e.name,
-                e.owner,
-                e.metadata.get("title", ""),
-                e.location,
-            )
-        Console().print(table)
-
-    def __repr__(self) -> str:
-        # Count via list() so deregistered/locationless branches don't inflate it.
-        return f"<Catalog with {len(self.list())} entries>"
-
-    def _repr_html_(self) -> str:
-        entries = sorted(self.list(), key=lambda e: e.name)
-        rows = "".join(
-            f"<tr><td><b>{e.name}</b></td><td>{e.owner}</td>"
-            f"<td>{e.metadata.get('title', '')}</td>"
-            f"<td><code>{e.location}</code></td></tr>"
-            for e in entries
-        )
-        return (
-            f"<table><thead><tr>"
-            f"<th colspan=4>Catalog ({len(entries)} entries)</th></tr>"
-            f"<tr><th>name</th><th>owner</th><th>title</th><th>location</th></tr>"
-            f"</thead><tbody>{rows}</tbody></table>"
-        )

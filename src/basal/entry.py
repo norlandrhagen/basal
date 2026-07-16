@@ -18,6 +18,8 @@ class Entry:
     snapshot_id: str
     metadata: dict[str, Any]
     written_at: Any = None
+    source: str | None = None
+    """Member alias when surfaced via a FederatedCatalog; None for a plain Catalog."""
 
     @property
     def location(self) -> str:
@@ -144,7 +146,6 @@ class Entry:
 
         Useful for manual zarr/xarray construction, writing, or accessing
         icechunk-specific APIs (tags, branches, ancestry, etc.).
-        # Q: Should we enforce readonly or have an option to switch
         """
         self._require_icechunk("open_repo")
         return self._open_dataset_repo(storage, config, authorize_virtual_chunk_access)
@@ -380,12 +381,14 @@ class Entry:
         return f"Entry(name={self.name!r}, owner={self.owner!r}, location={self.location!r})"
 
     def _repr_html_(self) -> str:
+        from html import escape
+
         rows = "".join(
-            f"<tr><td><b>{k}</b></td><td>{v}</td></tr>"
+            f"<tr><td><b>{escape(str(k))}</b></td><td>{escape(str(v))}</td></tr>"
             for k, v in self.metadata.items()
         )
         return (
-            f"<table><thead><tr><th colspan=2>Entry: {self.name}</th></tr></thead>"
+            f"<table><thead><tr><th colspan=2>Entry: {escape(self.name)}</th></tr></thead>"
             f"<tbody>{rows}"
             f"<tr><td><b>snapshot_id</b></td><td><code>{self.snapshot_id}</code></td></tr>"
             f"<tr><td><b>written_at</b></td><td>{self.written_at}</td></tr>"
