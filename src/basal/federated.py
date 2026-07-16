@@ -44,9 +44,7 @@ def _alias_for(catalog: Catalog) -> str:
 
 
 def _normalize_members(
-    members: dict[str, Catalog]
-    | list[Catalog]
-    | list[tuple[str, Catalog]],
+    members: dict[str, Catalog] | list[Catalog] | list[tuple[str, Catalog]],
 ) -> dict[str, Catalog]:
     """Coerce the accepted member forms into an ``{alias: Catalog}`` dict."""
     out: dict[str, Catalog] = {}
@@ -78,9 +76,7 @@ class FederatedCatalog(CatalogReadMixin):
 
     def __init__(
         self,
-        members: dict[str, Catalog]
-        | list[Catalog]
-        | list[tuple[str, Catalog]],
+        members: dict[str, Catalog] | list[Catalog] | list[tuple[str, Catalog]],
         *,
         max_workers: int = 8,
         strict: bool = True,
