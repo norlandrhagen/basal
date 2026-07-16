@@ -1,6 +1,7 @@
 from . import inspect, search, storage
 from .catalog import Catalog
 from .entry import Entry
+from .federated import FederatedCatalog
 from .storage import (
     StorageSpec,
     storage_from_config,
@@ -8,6 +9,7 @@ from .storage import (
 
 __all__ = [
     "Catalog",
+    "FederatedCatalog",
     "Entry",
     "search",
     "inspect",
