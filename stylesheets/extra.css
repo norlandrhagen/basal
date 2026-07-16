@@ -1,0 +1,24 @@
+:root,
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #5E666D;
+  --md-primary-fg-color--light: #7a838a;
+  --md-primary-fg-color--dark:  #454c52;
+  --md-accent-fg-color:         #7BA7C7;
+  --md-accent-fg-color--transparent: #7BA7C71a;
+}
+
+/* larger logo */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 3rem;
+}
+
+/* hide "basal" text in header — logo speaks for itself */
+.md-header__title .md-ellipsis {
+  display: none;
+}
+
+/* hide "basal" nav section label in sidebar */
+.md-nav--primary > .md-nav__title {
+  display: none;
+}
